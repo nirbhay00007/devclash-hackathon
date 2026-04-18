@@ -12,6 +12,7 @@ Transform complex codebases into interactive architectural maps. Understand depe
 - **Semantic RAG Search**: Ask questions in plain English. Vector search + Gemini AI returns exactly the files relevant to your task in milliseconds.
 - **MCP Agent Integration**: Connect Claude Desktop, Cursor, or Antigravity. Your AI agent gets permanent codebase memory with ~90% fewer tokens.
 - **Multi-Repo Merging**: Analyze frontend + backend + microservices simultaneously. Visualize cross-repository dependency relationships in one unified graph with an advanced radial cluster layout.
+- **Enterprise Onboarding Visiblity**: Designed specifically for new joiners. Instantly toggle between a **Unified Centralized Graph** (to understand how independent company microservices communicate) and an isolated **Repository-Wise Graph** (to focus deeply on a single codebase's file structure).
 
 ## 🏗️ Architecture
 
