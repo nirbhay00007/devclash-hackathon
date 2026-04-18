@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const os = require('os');
+const crypto = require('crypto');
 
 // Helper to log green text
 function logStep(msg) {
@@ -15,20 +16,30 @@ function logError(msg) {
 async function downloadFile(url, dest) {
     return new Promise((resolve, reject) => {
         const file = fs.createWriteStream(dest);
-        https.get(url, (response) => {
+        const request = https.get(url, { rejectUnauthorized: true }, (response) => {
             if (response.statusCode === 302 || response.statusCode === 301) {
-                // Handle redirect specifically for Ollama downloads
                 downloadFile(response.headers.location, dest).then(resolve).catch(reject);
                 return;
+            }
+            if (response.statusCode !== 200) {
+                return reject(new Error(`Server responded with ${response.statusCode}: ${response.statusMessage}`));
             }
             response.pipe(file);
             file.on('finish', () => {
                 file.close();
                 resolve();
             });
-        }).on('error', (err) => {
-            fs.unlink(dest, () => {}); // Delete the file async
+        });
+
+        request.on('error', (err) => {
+            fs.unlink(dest, () => {}); 
             reject(err);
+        });
+
+        // Fail-safe 30-second network timeout
+        request.setTimeout(30000, () => {
+            request.destroy();
+            reject(new Error('Network connection timed out while downloading.'));
         });
     });
 }
@@ -47,17 +58,27 @@ async function installOllama() {
     const platform = os.platform();
 
     if (platform === 'win32') {
-        const dest = path.join(os.tmpdir(), 'OllamaSetup.exe');
+        // Secure temp extraction to avoid static path hijacking
+        const secureTempDir = path.join(os.tmpdir(), `devclash-setup-${crypto.randomBytes(4).toString('hex')}`);
+        fs.mkdirSync(secureTempDir, { recursive: true });
+        const dest = path.join(secureTempDir, 'OllamaSetup.exe');
+        
         logStep('Downloading OllamaSetup.exe (this may take a minute)...');
-        await downloadFile('https://ollama.com/download/OllamaSetup.exe', dest);
-        logStep('Running Ollama Setup. You may see a Windows Admin confirmation shortly...');
         try {
-            // Run silently if possible, but standard execute works.
+            await downloadFile('https://ollama.com/download/OllamaSetup.exe', dest);
+            logStep('Running Ollama Setup. You may see a Windows Admin (UAC) confirmation shortly...');
             execSync(`"${dest}"`, { stdio: 'inherit' });
             logStep('Ollama installation complete.');
         } catch (e) {
-            logError('Ollama installer exited or was cancelled.');
+            if (e.message && e.message.includes('EPERM')) {
+                logError('Installation failed due to missing Administrator Privileges (EPERM). Please right-click the setup and Run as Administrator.');
+            } else {
+                logError(`Installer interrupted: ${e.message}`);
+            }
             process.exit(1);
+        } finally {
+            // Self-cleaning secure unmount
+            try { fs.rmSync(secureTempDir, { recursive: true, force: true }); } catch {}
         }
     } else {
         logStep('Downloading and running Ollama install script (requires sudo)...');
@@ -65,7 +86,7 @@ async function installOllama() {
             execSync('curl -fsSL https://ollama.com/install.sh | sh', { stdio: 'inherit' });
             logStep('Ollama installation complete.');
         } catch (e) {
-            logError('Ollama installer failed.');
+            logError('Ollama installer failed. Please ensure you have sudo/root privileges.');
             process.exit(1);
         }
     }
