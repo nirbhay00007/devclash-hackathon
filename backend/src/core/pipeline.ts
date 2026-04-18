@@ -13,9 +13,11 @@ import { initStore } from '../storage/persistentStore';
 import { countGitChurn } from './gitAnalyzer';
 import { Response } from 'express';
 import path from 'path';
-import fs from 'fs';
+import crypto from 'crypto';
 
 // ─── Concurrency Semaphore ────────────────────────────────────────────────────
+// Controls how many Ollama calls run in parallel. Higher = faster but uses more
+// RAM/CPU. 4 is balanced for 4-core machines; bump to 8 if your machine can handle it.
 
 function createSemaphore(concurrency: number) {
     let running = 0;
@@ -34,13 +36,14 @@ function createSemaphore(concurrency: number) {
 
 // ─── SSE Helper ───────────────────────────────────────────────────────────────
 
-type ProgressEvent = {
+export type ProgressEvent = {
     phase: string;
     message: string;
     progress?: number;
     total?: number;
     done?: number;
     language?: string;
+    error?: boolean;
 };
 
 function sendSSE(res: Response | null, event: ProgressEvent) {
@@ -59,14 +62,15 @@ export function isPipelineRunning()    { return _isRunning; }
 // ─── Pipeline Options ─────────────────────────────────────────────────────────
 
 export interface PipelineOptions {
-    /** Absolute local path — for TS/JS/Python repos already on disk */
+    /** Absolute local path — for repos already on disk */
     targetPath?: string;
-    /** GitHub URL — for Java repos that must be cloned first */
+    /** GitHub URL — cloned via git, then language auto-detected */
     repoUrl?: string;
     /** Force a specific language, skipping auto-detection */
     language?: 'typescript' | 'javascript' | 'java' | 'auto';
 }
 
+// Concurrency: 4 parallel Ollama calls (safe for 4-core; increase to 8 on better machines)
 const CONCURRENCY = 4;
 
 // ─── Main Pipeline ───────────────────────────────────────────────────────────
@@ -74,13 +78,13 @@ const CONCURRENCY = 4;
 /**
  * Unified polyglot ingestion pipeline.
  *
- * Phase 0  — Language detection + (if Java) clone via Spring Boot backend
- * Phase 1  — AST graph extraction + git churn
- * Phase 2  — Concurrent Ollama summarization (×4 parallel)
- * Phase 3  — Rich composite embedding into vector store
- * Phase 4  — Graph metrics (fan-in, fan-out, orphan, risk)
- * Phase 5  — Persist to .dev-clash/ inside repo
- * Phase 6  — Gemini holistic architectural analysis
+ * Phase 0  — Resolve input: local path OR GitHub URL clone + language detection
+ * Phase 1  — AST graph extraction (TS/JS via ts-morph | Java via Spring Boot)
+ * Phase 2  — Concurrent Ollama AI summarization (×CONCURRENCY parallel)
+ * Phase 3  — Rich composite embedding → in-memory vector store
+ * Phase 4  — Graph metrics: fan-in, fan-out, orphan, risk scoring
+ * Phase 5  — Persist everything to .dev-clash/ cache on disk
+ * Phase 6  — Gemini holistic architectural analysis (non-blocking)
  */
 export async function runIngestionPipeline(
     options: PipelineOptions,
@@ -91,106 +95,156 @@ export async function runIngestionPipeline(
     const startMs = Date.now();
 
     try {
-        let targetPath: string;
-        let rawNodes: GraphNode[];
-        let detectedLanguage: string;
+        let targetPath: string = '';
+        let rawNodes: GraphNode[] = [];
+        let detectedLanguage = 'unknown';
 
-        // ── Phase 0: Resolve path & extract raw graph ─────────────────────────
-        sendSSE(sseRes, { phase: 'init', message: 'Detecting repository language…', progress: 2 });
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 0 — Resolve repository path & extract raw dependency graph
+        // ═══════════════════════════════════════════════════════════════════════
+        sendSSE(sseRes, { phase: 'init', message: 'Initialising pipeline…', progress: 2 });
 
         if (options.repoUrl) {
-            // ─ GitHub URL path ────────────────────────────────────────────────
-            // Step 1: Clone shallowly to a local temp folder using Node git
+            // ── A. GitHub URL: shallow-clone locally first, then detect language ──
             sendSSE(sseRes, {
                 phase: 'clone',
                 message: `Cloning ${options.repoUrl}… (this may take 30-60s)`,
-                progress: 5,
+                progress: 4,
             });
-            console.log(`[Phase 0] GitHub clone: ${options.repoUrl}`);
 
-            // Shallow clone locally using Node (fast, no Java needed for TS/JS repos)
             targetPath = cloneRepoLocally(options.repoUrl);
-
-            // Step 2: Detect language of the freshly-cloned repo
             const profile = detectLanguage(targetPath);
             detectedLanguage = profile.language;
 
             sendSSE(sseRes, {
                 phase: 'clone',
-                message: `Cloned → ${targetPath}. Detected: ${profile.language} (${profile.fileCount} files).`,
+                message: `Cloned → ${path.basename(targetPath)}. Detected: ${profile.language} (${profile.fileCount} source files).`,
                 language: profile.language,
                 progress: 12,
             });
 
             if (profile.language === 'java') {
-                // ── Java path: parse via Spring Boot AST service ───────────────
+                // Java: use Spring Boot AST backend for class-level dependency graph
                 sendSSE(sseRes, {
                     phase: 'parse',
-                    message: 'Java repo detected — routing to Java AST backend…',
+                    message: 'Java repo — invoking Spring Boot AST backend for dependency graph…',
                     language: 'java',
                     progress: 14,
                 });
                 try {
                     const javaResponse = await cloneAndExtractJavaGraph(options.repoUrl);
                     rawNodes = adaptJavaGraphToGraphNodes(javaResponse, targetPath);
+                    sendSSE(sseRes, {
+                        phase: 'parse',
+                        message: `Java AST extracted. ${rawNodes.length} classes identified.`,
+                        language: 'java',
+                        progress: 20,
+                    });
                 } catch (javaErr: any) {
                     console.warn('[Phase 0] Java backend unavailable, falling back to file-level scan:', javaErr.message);
-                    rawNodes = extractGraph(targetPath);
+                    sendSSE(sseRes, {
+                        phase: 'parse',
+                        message: `Java AST backend offline — performing direct file scan. (${javaErr.message})`,
+                        language: 'java',
+                        progress: 16,
+                    });
+                    rawNodes = extractGraph(targetPath); // fallback: scan .java files as text
                 }
             } else {
-                // ── TS/JS/Python path: use our native AST parser ──────────────
+                // TS/JS/other: use native ts-morph AST parser
                 rawNodes = extractGraph(targetPath);
+                sendSSE(sseRes, {
+                    phase: 'parse',
+                    message: `TS/JS AST extracted. ${rawNodes.length} source files identified.`,
+                    language: profile.language,
+                    progress: 20,
+                });
             }
 
         } else if (options.targetPath) {
-            // ─ Local path: detect language, use native parser ─────────────────
-            targetPath = path.resolve(options.targetPath);
+            // ── B. Local path: detect language and parse accordingly ──────────
+            targetPath = options.targetPath;
             const profile = detectLanguage(targetPath);
             detectedLanguage = profile.language;
 
-            if (!['typescript', 'javascript'].includes(profile.language) && profile.fileCount === 0) {
+            if (profile.fileCount === 0) {
                 throw new Error(
                     `No supported source files found in "${targetPath}". ` +
                     `Detected language: ${profile.language}. ` +
-                    `For Java repos, provide a "repoUrl" instead of a "targetPath".`
+                    `Ensure the path points to a repository root with source files.`
                 );
             }
 
             sendSSE(sseRes, {
                 phase: 'parse',
-                message: `Detected ${profile.language} repo (${profile.fileCount} files). Extracting AST…`,
+                message: `${profile.language} repo detected (${profile.fileCount} files). Extracting dependency graph…`,
                 language: profile.language,
-                progress: 5,
+                progress: 8,
             });
-            console.log(`[Phase 0] Local ${profile.language} repo: ${targetPath}`);
 
-            rawNodes = extractGraph(targetPath);
+            if (profile.language === 'java') {
+                // Java local path: call /repo/local on Spring Boot AST backend
+                try {
+                    const javaResponse = await cloneAndExtractJavaGraph(targetPath, true); // true = local mode
+                    rawNodes = adaptJavaGraphToGraphNodes(javaResponse, targetPath);
+                    sendSSE(sseRes, {
+                        phase: 'parse',
+                        message: `Java AST extracted via AST backend. ${rawNodes.length} classes identified.`,
+                        language: 'java',
+                        progress: 16,
+                    });
+                } catch (javaErr: any) {
+                    console.warn('[Phase 0] Java backend unavailable for local path, using file adapter:', javaErr.message);
+                    // Fallback: use the Node-side fastFindJavaFiles to build synthetic nodes
+                    rawNodes = adaptJavaGraphToGraphNodes({ nodes: [], edges: [], clonedPath: targetPath }, targetPath);
+                    sendSSE(sseRes, {
+                        phase: 'parse',
+                        message: `Java backend offline — file-level scan. ${rawNodes.length} classes identified.`,
+                        language: 'java',
+                        progress: 16,
+                    });
+                }
+            } else {
+                // TS/JS: use ts-morph AST parser
+                rawNodes = extractGraph(targetPath);
+                sendSSE(sseRes, {
+                    phase: 'parse',
+                    message: `AST extracted. ${rawNodes.length} source files identified.`,
+                    language: profile.language,
+                    progress: 16,
+                });
+            }
         } else {
-            throw new Error('Pipeline requires either "targetPath" or "repoUrl".');
+            throw new Error('Pipeline requires either "targetPath" (local repo) or "repoUrl" (GitHub URL).');
         }
 
-        // ── Init per-repo persistent store ────────────────────────────────────
-        const store = initStore(targetPath);
+        if (rawNodes.length === 0) {
+            throw new Error(`Zero source files extracted from ${targetPath}. Check that the repo has supported source files.`);
+        }
 
-        // ── Reset in-memory state ─────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 1 — Initialise per-repo store + in-memory state
+        // ═══════════════════════════════════════════════════════════════════════
+        const store = initStore(targetPath);
         globalGraph.clear();
         clearVectorStore();
         _lastGlobalSummary = null;
 
-        // ── Phase 1: Git Churn ────────────────────────────────────────────────
         const churnMap = countGitChurn(targetPath);
+        const repoHash = crypto.createHash('sha256').update(targetPath).digest('hex').slice(0, 12);
 
-        console.log(`[Phase 1] ${rawNodes.length} source files found.`);
         sendSSE(sseRes, {
-            phase: 'parse',
+            phase: 'summarize',
             message: `Found ${rawNodes.length} source files (${detectedLanguage}). Running AI summarization (×${CONCURRENCY} parallel)…`,
             language: detectedLanguage,
             total: rawNodes.length,
             done: 0,
-            progress: 15,
+            progress: 20,
         });
 
-        // ── Phases 2 & 3: Summarize + Embed (concurrent) ─────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 2+3 — Concurrent Ollama summarization + vector store embedding
+        // ═══════════════════════════════════════════════════════════════════════
         const limit = createSemaphore(CONCURRENCY);
         let done = 0;
 
@@ -204,6 +258,7 @@ export async function runIngestionPipeline(
         await Promise.all(rawNodes.map(node => limit(async () => {
             const s = await summarizeFile(node.id);
 
+            // Add node to in-memory graph
             globalGraph.addNode({
                 id:             node.id,
                 summary:        s.summary,
@@ -217,16 +272,18 @@ export async function runIngestionPipeline(
                 codeQuality:    s.code_quality,
                 layer:          s.layer,
                 riskCategory:   'low',
-                commitChurn:    churnMap[node.id] || 0,
+                commitChurn:    churnMap[node.id] ?? 0,
             });
-            node.imports.forEach(t => globalGraph.addEdge(node.id, t));
 
+            // Add all dependency edges
+            node.imports.forEach(target => globalGraph.addEdge(node.id, target));
+
+            // Build composite embedding text and add to vector store
             const compositeText = buildCompositeText(
                 node.id, s.summary, s.key_exports, s.patterns,
                 s.external_deps, s.complexity, s.is_entry_point,
                 s.responsibility, s.internal_calls, node.imports,
             );
-
             await addRichDocument({
                 filePath:       node.id,
                 fileBasename:   path.basename(node.id),
@@ -241,21 +298,22 @@ export async function runIngestionPipeline(
                 internalCalls:  s.internal_calls,
             });
 
+            // Accumulate for Gemini global summary
             geminiPayload.push({
-                path:            node.id,
-                summary:         s.summary,
-                responsibility:  s.responsibility,
-                complexity:      s.complexity,
-                patterns:        s.patterns,
-                external_deps:   s.external_deps,
-                is_entry_point:  s.is_entry_point,
-                key_exports:     s.key_exports,
-                layer:           s.layer,
-                code_quality:    s.code_quality,
+                path:           node.id,
+                summary:        s.summary,
+                responsibility: s.responsibility,
+                complexity:     s.complexity,
+                patterns:       s.patterns,
+                external_deps:  s.external_deps,
+                is_entry_point: s.is_entry_point,
+                key_exports:    s.key_exports,
+                layer:          s.layer,
+                code_quality:   s.code_quality,
             });
 
             done++;
-            const progress = 15 + Math.round((done / rawNodes.length) * 63);
+            const progress = 20 + Math.round((done / rawNodes.length) * 58);
             console.log(`  [${done}/${rawNodes.length}] ${path.basename(node.id)}`);
             sendSSE(sseRes, {
                 phase: 'summarize',
@@ -264,11 +322,15 @@ export async function runIngestionPipeline(
             });
         })));
 
-        // ── Phase 4: Graph Metrics ─────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 4 — Graph Metrics (fan-in, fan-out, orphans, risk scoring)
+        // ═══════════════════════════════════════════════════════════════════════
         globalGraph.computeMetrics();
-        console.log('[Phase 4] Graph metrics computed.');
+        sendSSE(sseRes, { phase: 'metrics', message: 'Graph metrics computed.', progress: 79 });
 
-        // ── Phase 5: Persist ──────────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 5 — Persist to disk (.dev-clash/ cache)
+        // ═══════════════════════════════════════════════════════════════════════
         sendSSE(sseRes, { phase: 'persist', message: 'Persisting analysis to disk…', progress: 80 });
 
         const durationSoFar = Date.now() - startMs;
@@ -276,47 +338,48 @@ export async function runIngestionPipeline(
         persistVectorStore();
         store.saveMeta({
             repoPath:   targetPath,
-            repoHash:   store.dirPath,
+            repoHash,
             analyzedAt: new Date().toISOString(),
             fileCount:  rawNodes.length,
             durationMs: durationSoFar,
             language:   detectedLanguage,
         });
 
-        sendSSE(sseRes, { phase: 'persist', message: 'Analysis persisted to .dev-clash/', progress: 83 });
+        sendSSE(sseRes, { phase: 'persist', message: 'Analysis persisted to .dev-clash/', progress: 84 });
 
-        // ── Phase 6: Gemini Global Summary ────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════════════
+        // PHASE 6 — Gemini Global Architectural Summary (non-fatal)
+        // ═══════════════════════════════════════════════════════════════════════
         sendSSE(sseRes, {
             phase: 'gemini',
             message: 'Sending full context to Gemini for architectural analysis…',
-            progress: 85,
+            progress: 86,
         });
-        console.log('[Phase 6] Calling Gemini…');
 
         try {
             _lastGlobalSummary = await generateGlobalRepoSummary(geminiPayload);
             if (_lastGlobalSummary?.complexityHotspots) {
                 globalGraph.applyGeminiRiskAnnotations(_lastGlobalSummary.complexityHotspots);
             }
-            console.log('[Phase 6] Gemini summary complete.');
-            sendSSE(sseRes, { phase: 'gemini', message: 'Gemini analysis complete.', progress: 98 });
+            sendSSE(sseRes, { phase: 'gemini', message: 'Gemini architectural analysis complete.', progress: 98 });
         } catch (err: any) {
             console.warn('[Phase 6] Gemini failed (non-fatal):', err?.message ?? err);
             sendSSE(sseRes, {
                 phase: 'gemini',
-                message: 'Gemini unavailable — local analysis still complete.',
+                message: 'Gemini unavailable — local AI analysis still complete.',
                 progress: 98,
             });
         }
 
+        // ── Done ──────────────────────────────────────────────────────────────
         const totalMs = Date.now() - startMs;
         sendSSE(sseRes, {
             phase: 'done',
-            message: `Pipeline complete. ${rawNodes.length} files in ${(totalMs / 1000).toFixed(1)}s. Language: ${detectedLanguage}`,
+            message: `Pipeline complete. ${rawNodes.length} files analysed in ${(totalMs / 1000).toFixed(1)}s. Language: ${detectedLanguage}`,
             progress: 100,
             language: detectedLanguage,
         });
-        console.log(`[Pipeline] Done in ${totalMs}ms. Lang: ${detectedLanguage}`);
+        console.log(`[Pipeline] ✅ Done in ${totalMs}ms | ${rawNodes.length} files | lang=${detectedLanguage}`);
 
     } finally {
         _isRunning = false;

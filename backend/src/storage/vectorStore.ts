@@ -55,6 +55,8 @@ export function buildCompositeText(
 
 // ─── Core: embed a single document into the in-memory store ──────────────────
 
+export function getVectorStoreSize() { return _docs.length; }
+
 export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>) {
     // Idempotent: skip if already embedded this session
     if (_docs.some(d => d.filePath === doc.filePath)) return;
@@ -65,8 +67,11 @@ export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>) {
             prompt: doc.compositeText,
         });
         _docs.push({ ...doc, vector: response.embedding });
-    } catch {
-        console.log(`[VectorStore] Skipping embed for ${doc.fileBasename} — nomic-embed-text not available?`);
+    } catch (err: any) {
+        // Log the real error — silent swallowing hides misconfiguration
+        console.warn(`[VectorStore] Embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
+        // Fallback: store without vector (keyword search still works)
+        _docs.push({ ...doc, vector: [] });
     }
 }
 
@@ -149,6 +154,23 @@ export interface SearchResult {
     score: number;
 }
 
+/** Keyword-based fallback search when vector embeddings are unavailable. */
+function keywordSearch(query: string, maxResults: number): RichVectorDoc[] {
+    const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    if (terms.length === 0) return _docs.slice(0, maxResults);
+
+    return _docs
+        .map(doc => {
+            const haystack = (doc.compositeText + ' ' + doc.fileBasename).toLowerCase();
+            const hits = terms.filter(t => haystack.includes(t)).length;
+            return { doc, hits };
+        })
+        .filter(x => x.hits > 0)
+        .sort((a, b) => b.hits - a.hits)
+        .slice(0, maxResults)
+        .map(x => x.doc);
+}
+
 export async function semanticSearch(
     query: string,
     maxResults: number = 8,
@@ -156,20 +178,25 @@ export async function semanticSearch(
 ): Promise<SearchResult[]> {
     if (_docs.length === 0) return [];
 
+    // Attempt vector search; fall back to keyword search if Ollama embed fails
+    let results: RichVectorDoc[];
     try {
         const response = await ollama.embeddings({ model: 'nomic-embed-text', prompt: query });
         const queryVec = response.embedding;
 
-        // Score every document
-        const scored = _docs.map(doc => ({
+        // Only score docs that have a valid embedding vector
+        const embeddable = _docs.filter(d => d.vector.length > 0);
+        const scored = embeddable.map(doc => ({
             doc,
             score: cosineSimilarity(queryVec, doc.vector),
         })).sort((a, b) => b.score - a.score);
 
-        // Apply MMR for diverse results, or fall back to top-K
-        const results = useMmr
+        results = useMmr
             ? mmrSearch(queryVec, scored, maxResults)
             : scored.slice(0, maxResults).map(s => s.doc);
+
+        // If vector search returned nothing, use keyword fallback
+        if (results.length === 0) results = keywordSearch(query, maxResults);
 
         return results.map(doc => ({
             filePath:       doc.filePath,
@@ -183,8 +210,21 @@ export async function semanticSearch(
             isEntryPoint:   doc.isEntryPoint,
             score:          cosineSimilarity(queryVec, doc.vector),
         }));
-    } catch {
-        return [];
+    } catch (err: any) {
+        console.warn(`[VectorStore] Vector search failed (${err?.message}), using keyword fallback`);
+        results = keywordSearch(query, maxResults);
+        return results.map(doc => ({
+            filePath:       doc.filePath,
+            fileBasename:   doc.fileBasename,
+            summary:        doc.summary,
+            responsibility: doc.responsibility,
+            keyExports:     doc.keyExports,
+            internalCalls:  doc.internalCalls,
+            patterns:       doc.patterns,
+            complexity:     doc.complexity,
+            isEntryPoint:   doc.isEntryPoint,
+            score:          0.5, // synthetic score for keyword hits
+        }));
     }
 }
 

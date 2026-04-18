@@ -51,7 +51,12 @@ app.post('/api/analyze', async (req, res) => {
         return res.status(409).json({ error: 'Pipeline is already running. Please wait.' });
     }
 
-    let { targetPath, repoUrl, language } = req.body;
+    // Guard: Express 5 body-parser may leave req.body undefined on Content-Type mismatch
+    if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Request body must be JSON with "targetPath" or "repoUrl".' });
+    }
+
+    let { targetPath, repoUrl, language } = req.body as { targetPath?: string; repoUrl?: string; language?: string };
 
     // Graceful fallback: If the frontend sends a URL inside targetPath, intercept it
     if (targetPath && typeof targetPath === 'string') {
@@ -73,7 +78,7 @@ app.post('/api/analyze', async (req, res) => {
     const options: PipelineOptions = {
         targetPath: targetPath ? path.resolve(targetPath) : undefined,
         repoUrl:    repoUrl   ?? undefined,
-        language:   language  ?? 'auto',
+        language:   (language as PipelineOptions['language']) ?? 'auto',
     };
 
     // Set up SSE
@@ -181,23 +186,27 @@ app.post('/api/load', async (req, res) => {
 // Body: { query: string, maxResults?: number }
 
 app.post('/api/query', async (req, res) => {
-    const { query, maxResults = 8 } = req.body;
+    if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Request body must be JSON with a "query" field.' });
+    }
+    const { query, maxResults = 8 } = req.body as { query?: string; maxResults?: number };
 
     if (!query || typeof query !== 'string' || query.trim().length === 0) {
         return res.status(400).json({ error: 'Request body must contain a non-empty "query" string.' });
     }
 
     try {
-        // Step 1: Semantic vector search → find most relevant files
+        // Step 1: Semantic vector search (with keyword fallback built-in)
         const searchResults = await semanticSearch(query.trim(), maxResults);
 
         if (searchResults.length === 0) {
             return res.status(404).json({
-                error: 'No relevant files found. The vector store may be empty — run /api/analyze first.',
+                error: 'No relevant files found. Run /api/analyze first to build the vector index.',
+                results: [],
             });
         }
 
-        // Step 2: Build a rich sub-graph with ALL available context for Gemini
+        // Step 2: Build rich sub-graph for Gemini context
         const subGraph = searchResults.map(r => {
             const node = globalGraph.getNode(r.filePath);
             return {
@@ -206,27 +215,34 @@ app.post('/api/query', async (req, res) => {
                 summary:        r.summary,
                 responsibility: r.responsibility,
                 complexity:     r.complexity,
-                codeQuality:    node?.codeQuality   ?? 'acceptable',
-                layer:          node?.layer         ?? 'unknown',
+                codeQuality:    node?.codeQuality       ?? 'acceptable',
+                layer:          node?.layer             ?? 'unknown',
                 patterns:       r.patterns,
                 keyExports:     r.keyExports,
                 internalCalls:  r.internalCalls,
                 fanIn:          node?.inboundEdgeCount  ?? 0,
                 fanOut:         node?.outboundEdgeCount ?? 0,
-                risk:           node?.riskCategory  ?? 'unknown',
-                isOrphan:       node?.isOrphan       ?? false,
-                commitChurn:    node?.commitChurn    ?? 0,
+                risk:           node?.riskCategory      ?? 'unknown',
+                isOrphan:       node?.isOrphan          ?? false,
+                commitChurn:    node?.commitChurn       ?? 0,
             };
         });
 
-        // Step 3: Ask Gemini to synthesize an architectural answer
-        const analysis = await askGeminiArchitect(subGraph, query.trim());
+        // Step 3: Gemini architectural synthesis (non-fatal — works without API key)
+        let analysis = null;
+        try {
+            analysis = await askGeminiArchitect(subGraph, query.trim());
+        } catch (geminiErr: any) {
+            console.warn('[API /api/query] Gemini unavailable (non-fatal):', geminiErr?.message ?? geminiErr);
+        }
 
         res.json({
             success: true,
             query,
+            results:      searchResults.map(r => ({ path: r.filePath, score: r.score, summary: r.summary })),
             relevantFiles: searchResults.map(r => ({ path: r.filePath, score: r.score })),
             analysis,
+            gemini: analysis !== null,
         });
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

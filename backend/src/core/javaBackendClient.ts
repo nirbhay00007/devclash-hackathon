@@ -49,7 +49,7 @@ export async function isJavaBackendAlive(): Promise<boolean> {
  * The returned `clonedPath` can then be passed directly into our
  * Ollama summarisation pipeline as if it were a local repo.
  */
-export async function cloneAndExtractJavaGraph(repoUrl: string): Promise<JavaGraphResponse> {
+export async function cloneAndExtractJavaGraph(repoUrlOrPath: string, localMode = false): Promise<JavaGraphResponse> {
     const alive = await isJavaBackendAlive();
     if (!alive) {
         throw new Error(
@@ -58,16 +58,19 @@ export async function cloneAndExtractJavaGraph(repoUrl: string): Promise<JavaGra
         );
     }
 
-    const encodedUrl = encodeURIComponent(repoUrl);
+    const encoded = encodeURIComponent(repoUrlOrPath);
+    const apiPath = localMode
+        ? `/repo/local?path=${encoded}`   // Already-cloned local directory
+        : `/repo/graph?url=${encoded}`;   // GitHub URL — Spring Boot clones it
 
     return new Promise((resolve, reject) => {
         const req = http.request(
             {
                 hostname: JAVA_BACKEND_HOST,
-                port: JAVA_BACKEND_PORT,
-                path: `/repo/graph?url=${encodedUrl}`,
-                method: 'POST',
-                timeout: JAVA_BACKEND_TIMEOUT_MS,
+                port:     JAVA_BACKEND_PORT,
+                path:     apiPath,
+                method:   'POST',
+                timeout:  JAVA_BACKEND_TIMEOUT_MS,
             },
             res => {
                 let data = '';
@@ -86,11 +89,8 @@ export async function cloneAndExtractJavaGraph(repoUrl: string): Promise<JavaGra
             }
         );
 
-        req.on('error', err => reject(new Error(`Java backend connection error: ${err.message}`)));
-        req.on('timeout', () => {
-            req.destroy();
-            reject(new Error(`Java backend timed out after ${JAVA_BACKEND_TIMEOUT_MS / 1000}s`));
-        });
+        req.on('error',   err => reject(new Error(`Java backend connection error: ${err.message}`)));
+        req.on('timeout', ()  => { req.destroy(); reject(new Error(`Java backend timed out after ${JAVA_BACKEND_TIMEOUT_MS / 1000}s`)); });
         req.end();
     });
 }
