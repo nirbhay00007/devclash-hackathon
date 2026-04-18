@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import ArchitectureGraph from './components/ArchitectureGraph';
 import type { BackendNode, BackendEdge } from './components/ArchitectureGraph';
 import NodeDetailPanel from './components/NodeDetailPanel';
@@ -81,7 +81,23 @@ export default function App() {
   const [query, setQuery]           = useState('');
   const [querying, setQuerying]     = useState(false);
   const [queryResult, setQueryResult] = useState<QueryAnalysis | null>(null);
-  const [queryFiles, setQueryFiles]   = useState<{ path: string; score: number }[]>([]);
+  const [queryFiles, setQueryFiles] = useState<{ path: string; score: number }[]>([]);
+
+  // Graph Filter
+  const [graphFilterRepoId, setGraphFilterRepoId] = useState<string | null>(null);
+
+  // Filter nodes & edges before rendering based on user selection
+  const displayedNodes = useMemo(() => {
+    if (!graphFilterRepoId) return mergedNodes;
+    return mergedNodes.filter((n: BackendNode) => n.data.repoId === graphFilterRepoId);
+  }, [mergedNodes, graphFilterRepoId]);
+
+  const displayedEdges = useMemo(() => {
+    if (!graphFilterRepoId) return mergedEdges;
+    // For single repo view, only show intra-repo edges to reduce noise
+    const allowed = new Set(displayedNodes.map((n: BackendNode) => n.id));
+    return mergedEdges.filter((e: BackendEdge) => allowed.has(e.source) && allowed.has(e.target));
+  }, [mergedEdges, displayedNodes, graphFilterRepoId]);
 
   // Selected node
   const [selectedNode, setSelectedNode] = useState<{ id: string; data: BackendNode['data'] } | null>(null);
@@ -142,7 +158,7 @@ export default function App() {
     try {
       const res = await fetch(`${API}/api/analyze`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetPath: path }), signal: abort.signal,
+        body: JSON.stringify({ targetPath: path, repoId: id, repoLabel: repo.label }), signal: abort.signal,
       });
       if (!res.ok || !res.body) { updateRepo(id, { status: 'error', log: [`❌ HTTP ${res.status}`] }); return; }
       const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';
@@ -608,7 +624,7 @@ export default function App() {
 
         {/* ── GRAPH CANVAS ── shown for repos/graph/arch/query */}
         {(activeTab === 'repos' || activeTab === 'graph' || activeTab === 'arch' || activeTab === 'query') && (
-        <main className="graph-canvas" style={{ flex: 1 }}>
+        <main className="graph-canvas" style={{ flex: 1, position: 'relative' }}>
           {mergedNodes.length === 0 ? (
             <div className="graph-empty">
               <div className="graph-empty-icon">🕸</div>
@@ -618,13 +634,54 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <ArchitectureGraph
-              backendNodes={mergedNodes}
-              backendEdges={mergedEdges}
-              onNodeSelect={n => setSelectedNode(
-                n ? { id: n.id, data: { ...n.data, codeQuality: (n.data.codeQuality as any) } } : null
+            <>
+              {/* Repository Filter Toggle */}
+              {repos.length > 1 && (
+                <div style={{
+                  position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 10,
+                  background: 'rgba(255,255,255,0.9)', backdropFilter: 'blur(8px)',
+                  padding: '4px', borderRadius: 8, border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.05)',
+                  display: 'flex', gap: 4, alignItems: 'center'
+                }}>
+                  <button
+                    onClick={() => setGraphFilterRepoId(null)}
+                    style={{
+                      padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', cursor: 'pointer',
+                      background: graphFilterRepoId === null ? '#f97316' : 'transparent',
+                      color: graphFilterRepoId === null ? '#fff' : '#64748b',
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    All Repositories (Unified)
+                  </button>
+                  <div style={{ width: 1, height: 16, background: '#e2e8f0' }} />
+                  {repos.map(r => (
+                    <button
+                      key={r.id}
+                      onClick={() => setGraphFilterRepoId(r.id)}
+                      style={{
+                        padding: '6px 12px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', cursor: 'pointer',
+                        background: graphFilterRepoId === r.id ? '#f8fafc' : 'transparent',
+                        color: graphFilterRepoId === r.id ? '#0f172a' : '#64748b',
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: r.color }} />
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
               )}
-            />
+
+              <ArchitectureGraph
+                backendNodes={displayedNodes}
+                backendEdges={displayedEdges}
+                onNodeSelect={n => setSelectedNode(
+                  n ? { id: n.id, data: { ...n.data, codeQuality: (n.data.codeQuality as any) } } : null
+                )}
+              />
+            </>
           )}
           <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
         </main>

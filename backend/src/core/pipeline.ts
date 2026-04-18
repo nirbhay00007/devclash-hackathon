@@ -54,10 +54,11 @@ function sendSSE(res: Response | null, event: ProgressEvent) {
 // ─── Global run state ─────────────────────────────────────────────────────────
 
 let _lastGlobalSummary: GlobalRepoSummary | null = null;
-let _isRunning = false;
+const _runningRepos = new Set<string>(); // repoId → running
 
 export function getLastGlobalSummary() { return _lastGlobalSummary; }
-export function isPipelineRunning()    { return _isRunning; }
+export function isPipelineRunning()    { return _runningRepos.size > 0; }
+export function isRepoRunning(repoId: string) { return _runningRepos.has(repoId); }
 
 // ─── Pipeline Options ─────────────────────────────────────────────────────────
 
@@ -68,6 +69,10 @@ export interface PipelineOptions {
     repoUrl?: string;
     /** Force a specific language, skipping auto-detection */
     language?: 'typescript' | 'javascript' | 'java' | 'auto';
+    /** Unique repo identifier from frontend (UUID) */
+    repoId?: string;
+    /** Human-readable repo name */
+    repoLabel?: string;
 }
 
 // Concurrency: 4 parallel Ollama calls (safe for 4-core; increase to 8 on better machines)
@@ -90,8 +95,11 @@ export async function runIngestionPipeline(
     options: PipelineOptions,
     sseRes: Response | null = null
 ) {
-    if (_isRunning) throw new Error('Pipeline is already running.');
-    _isRunning = true;
+    const repoId    = options.repoId    ?? 'default';
+    const repoLabel = options.repoLabel ?? (options.targetPath ? path.basename(options.targetPath) : 'repo');
+
+    if (_runningRepos.has(repoId)) throw new Error(`Repo ${repoId} is already being ingested.`);
+    _runningRepos.add(repoId);
     const startMs = Date.now();
 
     try {
@@ -226,8 +234,8 @@ export async function runIngestionPipeline(
         // PHASE 1 — Initialise per-repo store + in-memory state
         // ═══════════════════════════════════════════════════════════════════════
         const store = initStore(targetPath);
-        globalGraph.clear();
-        clearVectorStore();
+        // Clear only this repo's previous nodes (allow other repos to stay)
+        globalGraph.clearForRepo(repoId);
         _lastGlobalSummary = null;
 
         const churnMap = countGitChurn(targetPath);
@@ -261,6 +269,9 @@ export async function runIngestionPipeline(
             // Add node to in-memory graph
             globalGraph.addNode({
                 id:             node.id,
+                repoId,
+                repoLabel,
+                repoPath:       targetPath,
                 summary:        s.summary,
                 responsibility: s.responsibility,
                 isEntryPoint:   s.is_entry_point,
@@ -382,6 +393,6 @@ export async function runIngestionPipeline(
         console.log(`[Pipeline] ✅ Done in ${totalMs}ms | ${rawNodes.length} files | lang=${detectedLanguage}`);
 
     } finally {
-        _isRunning = false;
+        _runningRepos.delete(repoId);
     }
 }

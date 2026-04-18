@@ -9,6 +9,9 @@ export interface Edge {
 
 export interface NodeMetadata {
     id: string;                    // Absolute file path (normalized)
+    repoId: string;                // Unique repo identifier (from frontend)
+    repoLabel: string;             // Human-readable repo name
+    repoPath: string;              // Root path of the repo this file belongs to
     summary: string;               // LLM architectural summary
     responsibility: string;        // Single-line core responsibility
     isEntryPoint: boolean;
@@ -51,6 +54,41 @@ export class GraphStore {
     clear() {
         this.nodes.clear();
         this.edges = [];
+    }
+
+    /** Remove only the nodes and edges belonging to a specific repo */
+    clearForRepo(repoId: string) {
+        for (const [id, node] of this.nodes.entries()) {
+            if (node.repoId === repoId) this.nodes.delete(id);
+        }
+        const repoNodeIds = new Set(
+            Array.from(this.nodes.values())
+                .filter(n => n.repoId !== repoId)
+                .map(n => n.id)
+        );
+        // Keep edges where both endpoints still exist
+        this.edges = this.edges.filter(
+            e => !(e.source.startsWith('') || true) ||
+                 (repoNodeIds.has(e.source) || repoNodeIds.has(e.target))
+        );
+        // Simpler: just remove edges where either node was from that repo
+        const removedIds = new Set<string>();
+        for (const [id, node] of Array.from(this.nodes.entries())) {
+            if (node.repoId !== repoId) continue;
+            removedIds.add(id);
+        }
+        // Re-clear correctly
+        for (const [id, node] of Array.from(this.nodes.entries())) {
+            if (node.repoId === repoId) { removedIds.add(id); this.nodes.delete(id); }
+        }
+        this.edges = this.edges.filter(e => !removedIds.has(e.source) && !removedIds.has(e.target));
+    }
+
+    /** Get all unique repoIds present in this graph */
+    getRepoIds(): string[] {
+        const ids = new Set<string>();
+        this.nodes.forEach(n => ids.add(n.repoId));
+        return Array.from(ids);
     }
 
     /**
@@ -123,11 +161,16 @@ export class GraphStore {
     /**
      * Serializes the graph for the React Flow frontend.
      * Grid layout with entry points sorted to the front.
+     * Optionally filters to only include nodes & internal edges for a specific repoId.
      */
-    exportForReactFlow() {
+    exportForReactFlow(repoId?: string) {
         this.computeMetrics();
 
-        const nodesArr = Array.from(this.nodes.values());
+        // 1. Filter Nodes
+        let nodesArr = Array.from(this.nodes.values());
+        if (repoId) {
+            nodesArr = nodesArr.filter(n => n.repoId === repoId);
+        }
 
         // Sort: entry points first, then by risk (high→low), then alphabetically
         nodesArr.sort((a, b) => {
@@ -148,6 +191,9 @@ export class GraphStore {
             data: {
                 label: path.basename(n.id),
                 fullPath: n.id,
+                repoId: n.repoId,
+                repoLabel: n.repoLabel,
+                repoPath: n.repoPath,
                 summary: n.summary,
                 responsibility: n.responsibility,
                 risk: n.riskCategory,
@@ -166,7 +212,11 @@ export class GraphStore {
             },
         }));
 
-        const reactFlowEdges = this.edges.map(e => ({
+        // 2. Filter Edges (only if both source and target are in our filtered nodes list)
+        const allowedNodeIds = new Set(nodesArr.map(n => n.id));
+        const filteredEdges = this.edges.filter(e => allowedNodeIds.has(e.source) && allowedNodeIds.has(e.target));
+
+        const reactFlowEdges = filteredEdges.map(e => ({
             id: `e-${e.source}-${e.target}`,
             source: e.source,
             target: e.target,

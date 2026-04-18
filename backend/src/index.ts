@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { exec } from 'child_process';
-import { runIngestionPipeline, getLastGlobalSummary, isPipelineRunning, PipelineOptions } from './core/pipeline';
+import { runIngestionPipeline, getLastGlobalSummary, isPipelineRunning, isRepoRunning, PipelineOptions } from './core/pipeline';
 import { globalGraph } from './storage/graphStore';
 import { semanticSearch, initVectorStore } from './storage/vectorStore';
 import { askGeminiArchitect } from './ai/geminiIntelligence';
@@ -48,16 +48,16 @@ app.get('/api/status', async (_req, res) => {
 //   { repoUrl: string }     — GitHub Java repo (clones via Spring Boot)
 
 app.post('/api/analyze', async (req, res) => {
-    if (isPipelineRunning()) {
-        return res.status(409).json({ error: 'Pipeline is already running. Please wait.' });
-    }
 
     // Guard: Express 5 body-parser may leave req.body undefined on Content-Type mismatch
     if (!req.body || typeof req.body !== 'object') {
         return res.status(400).json({ error: 'Request body must be JSON with "targetPath" or "repoUrl".' });
     }
 
-    let { targetPath, repoUrl, language } = req.body as { targetPath?: string; repoUrl?: string; language?: string };
+    let { targetPath, repoUrl, language, repoId, repoLabel } = req.body as {
+        targetPath?: string; repoUrl?: string; language?: string;
+        repoId?: string; repoLabel?: string;
+    };
 
     // Graceful fallback: If the frontend sends a URL inside targetPath, intercept it
     if (targetPath && typeof targetPath === 'string') {
@@ -76,10 +76,17 @@ app.post('/api/analyze', async (req, res) => {
         });
     }
 
+    // Check if this specific repo is already running (not blocking other repos)
+    if (repoId && isRepoRunning(repoId)) {
+        return res.status(409).json({ error: `Repo ${repoId} is already being analyzed.` });
+    }
+
     const options: PipelineOptions = {
         targetPath: targetPath ? path.resolve(targetPath) : undefined,
         repoUrl:    repoUrl   ?? undefined,
         language:   (language as PipelineOptions['language']) ?? 'auto',
+        repoId:     repoId,
+        repoLabel:  repoLabel,
     };
 
     // Set up SSE
@@ -91,7 +98,7 @@ app.post('/api/analyze', async (req, res) => {
     try {
         await runIngestionPipeline(options, res);
 
-        const graphData    = globalGraph.exportForReactFlow();
+        const graphData    = globalGraph.exportForReactFlow(options.repoId);
         const globalSummary = getLastGlobalSummary();
 
         res.write(`data: ${JSON.stringify({
