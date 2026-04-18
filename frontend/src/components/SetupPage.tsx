@@ -3,16 +3,11 @@ import { useState } from 'react';
 type OS    = 'windows' | 'mac' | 'linux';
 type Agent = 'claude' | 'cursor' | 'antigravity';
 
-const OLLAMA_MAP: Record<OS, { url: string; label: string; size: string; cmd?: string }> = {
-  windows: { url: 'https://ollama.com/download/OllamaSetup.exe',   label: 'Download for Windows (.exe)', size: '~80 MB' },
-  mac:     { url: 'https://ollama.com/download/Ollama-darwin.zip', label: 'Download for macOS (.zip)',   size: '~60 MB' },
-  linux:   { url: '', label: 'Install via curl', size: '', cmd: 'curl -fsSL https://ollama.com/install.sh | sh' },
+const OS_LINKS: Record<OS, { label: string; size: string; icon: string; fakeLink: boolean }> = {
+  windows: { label: 'Download CodeMap_Installer.exe', size: 'v1.0.0 · ~6 MB', icon: '🪟', fakeLink: true },
+  mac:     { label: 'Download for macOS (.dmg)',      size: 'v1.0.0 · ~12 MB', icon: '🍎', fakeLink: true },
+  linux:   { label: 'curl -fsSL https://codemap.ai/install.sh', size: '', icon: '🐧', fakeLink: false },
 };
-
-const MODELS = [
-  { id: 'qwen2.5-coder:3b', icon: '🧠', title: 'qwen2.5-coder:3b', sub: 'Code Summarization',  size: '1.9 GB', cmd: 'ollama pull qwen2.5-coder:3b', color: '#f97316' },
-  { id: 'nomic-embed-text', icon: '🔢', title: 'nomic-embed-text', sub: 'Vector Embeddings',    size: '274 MB', cmd: 'ollama pull nomic-embed-text',  color: '#0ea5e9' },
-];
 
 const AGENTS: Record<Agent, { icon: string; label: string; desc: string; file: string; config: string; tip: string }> = {
   claude: {
@@ -64,26 +59,17 @@ export default function SetupPage() {
   const [os, setOs]         = useState<OS>('windows');
   const [agent, setAgent]   = useState<Agent>('claude');
   const [copied, setCopied] = useState<string | null>(null);
-  const [ollamaOk, setOllamaOk]    = useState<boolean | null>(null);
-  const [modelStatus, setModelStatus] = useState<Record<string, boolean>>({});
-  const [checking, setChecking]    = useState(false);
-
   const copy = (id: string, text: string) => {
     navigator.clipboard.writeText(text).then(() => { setCopied(id); setTimeout(() => setCopied(null), 2000); });
   };
 
-  const checkOllama = async () => {
-    setChecking(true);
-    try {
-      const r = await fetch('http://localhost:11434/api/tags');
-      const j = await r.json();
-      const names: string[] = (j.models ?? []).map((m: { name: string }) => m.name);
-      setOllamaOk(true);
-      const s: Record<string, boolean> = {};
-      MODELS.forEach(m => { s[m.id] = names.some(n => n.includes(m.id.split(':')[0])); });
-      setModelStatus(s);
-    } catch { setOllamaOk(false); }
-    finally   { setChecking(false); }
+  const [downloading, setDownloading] = useState(false);
+  const handleDownload = () => {
+    setDownloading(true);
+    setTimeout(() => {
+      setDownloading(false);
+      alert('In a production environment, this would start downloading CodeMap_Installer.exe');
+    }, 1500);
   };
 
   const ag = AGENTS[agent];
@@ -125,103 +111,77 @@ export default function SetupPage() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 24, alignItems: 'start' }}>
 
           {/* ╔══════════════════════════════╗
-              ║  CARD 1 — Install Ollama     ║
+              ║  CARD 1 — Install Bridge     ║
               ╚══════════════════════════════╝ */}
           <div style={{ background: 'var(--white)', border: '1px solid var(--gray-200)', borderRadius: 20, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.07)', display: 'flex', flexDirection: 'column' }}>
-            {/* Card header */}
             <div style={{ padding: '22px 22px 18px', borderBottom: '1px solid var(--gray-100)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                 <div style={{ width: 30, height: 30, borderRadius: 9, background: 'var(--black)', color: 'var(--white)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 900 }}>1</div>
-                <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--black)', letterSpacing: '-0.3px' }}>Install Ollama</span>
+                <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--black)', letterSpacing: '-0.3px' }}>Download Local Bridge</span>
               </div>
-              <p style={{ fontSize: 12.5, color: 'var(--gray-500)', lineHeight: 1.65 }}>Runs AI models 100% locally. No data leaves your machine.</p>
+              <p style={{ fontSize: 12.5, color: 'var(--gray-500)', lineHeight: 1.65 }}>A single lightweight executable that automatically bootstraps your local AI engine and models.</p>
             </div>
-            {/* OS tabs */}
+            
             <div style={{ padding: '16px 22px', display: 'flex', gap: 6 }}>
               {(['windows','mac','linux'] as OS[]).map(o => (
                 <button key={o} onClick={() => setOs(o)} className={`os-btn${os===o?' active':''}`} style={{ flex:1, textAlign:'center', padding:'7px 0' }}>
-                  {o==='windows'?'🪟 Win':o==='mac'?'🍎 Mac':'🐧 Linux'}
+                  {OS_LINKS[o].icon} {o.charAt(0).toUpperCase() + o.slice(1)}
                 </button>
               ))}
             </div>
+            
             <div style={{ padding: '0 22px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {OLLAMA_MAP[os].cmd ? (
+              {os === 'linux' ? (
                 <div style={{ position:'relative', background:'#0d1117', borderRadius:12, padding:'12px 14px' }}>
-                  <code style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'#79c0ff', display:'block' }}>{OLLAMA_MAP[os].cmd}</code>
-                  <button className="copy-btn" onClick={() => copy('ollama-cmd', OLLAMA_MAP[os].cmd!)}>{copied==='ollama-cmd'?'✓':'Copy'}</button>
+                  <code style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'#79c0ff', display:'block' }}>{OS_LINKS[os].label}</code>
+                  <button className="copy-btn" onClick={() => navigator.clipboard.writeText(OS_LINKS[os].label)}>{copied==='linux'?'✓':'Copy'}</button>
                 </div>
               ) : (
-                <a href={OLLAMA_MAP[os].url} target="_blank" rel="noreferrer"
-                  style={{ display:'flex', alignItems:'center', gap:10, background:'var(--orange)', color:'#fff', borderRadius:12, padding:'13px 16px', textDecoration:'none', fontWeight:700, fontSize:13.5, boxShadow:'0 4px 14px rgba(249,115,22,0.3)' }}>
-                  <span style={{ fontSize:18 }}>⬇️</span>
-                  <span style={{ flex:1 }}>{OLLAMA_MAP[os].label}</span>
-                  <span style={{ fontSize:11, opacity:0.7 }}>{OLLAMA_MAP[os].size}</span>
-                </a>
+                <button onClick={handleDownload} disabled={downloading}
+                  style={{ display:'flex', alignItems:'center', gap:10, background:'var(--orange)', color:'#fff', borderRadius:12, padding:'13px 16px', border:'none', cursor:downloading?'wait':'pointer', fontWeight:700, fontSize:13.5, boxShadow:'0 4px 14px rgba(249,115,22,0.3)', transition:'all 0.2s' }}>
+                  <span style={{ fontSize:18 }}>{downloading ? '⏳' : '⬇️'}</span>
+                  <span style={{ flex:1, textAlign:'left' }}>{downloading ? 'Downloading...' : OS_LINKS[os].label}</span>
+                  <span style={{ fontSize:11, opacity:0.7 }}>{OS_LINKS[os].size}</span>
+                </button>
               )}
-              <p style={{ fontSize:11.5, color:'var(--gray-400)', lineHeight:1.6 }}>
-                <strong style={{ color:'var(--gray-500)' }}>Your code never leaves your machine.</strong> Ollama runs entirely offline.
-              </p>
+              
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px', marginTop: 4 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 700, color: '#334155', marginBottom: 6 }}>What the installer does automatically:</div>
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: 'var(--gray-500)', lineHeight: 1.6 }}>
+                  <li>Checks for Java and Node.js existence</li>
+                  <li>Silently installs the Ollama ML Engine if missing</li>
+                  <li>Pulls `qwen2.5-coder:3b` and `nomic-embed-text` locally</li>
+                  <li>Starts the `localhost:3001` MCP daemon</li>
+                </ul>
+              </div>
             </div>
           </div>
 
           {/* ╔══════════════════════════════╗
-              ║  CARD 2 — Pull AI Models     ║
+              ║  CARD 2 — Centralized Cache  ║
               ╚══════════════════════════════╝ */}
           <div style={{ background: 'var(--white)', border: '1px solid var(--gray-200)', borderRadius: 20, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.07)', display: 'flex', flexDirection: 'column' }}>
             <div style={{ padding: '22px 22px 18px', borderBottom: '1px solid var(--gray-100)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
                 <div style={{ width: 30, height: 30, borderRadius: 9, background: 'var(--black)', color: 'var(--white)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 900 }}>2</div>
-                <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--black)', letterSpacing: '-0.3px' }}>Pull AI Models</span>
-                <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--gray-400)', fontWeight: 500 }}>Run once</span>
+                <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--black)', letterSpacing: '-0.3px' }}>Universal Embedded Memory</span>
               </div>
-              <p style={{ fontSize: 12.5, color: 'var(--gray-500)', lineHeight: 1.65 }}>Two models — one for code understanding, one for semantic vector search.</p>
+              <p style={{ fontSize: 12.5, color: 'var(--gray-500)', lineHeight: 1.65 }}>The client aggregates LLM embeddings consistently offline to drastically reduce token costs.</p>
             </div>
-            <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {MODELS.map(m => (
-                <div key={m.id} style={{ border: '1px solid var(--gray-200)', borderRadius: 12, overflow: 'hidden', background: 'var(--gray-50)' }}>
-                  <div style={{ padding: '10px 14px 8px', display: 'flex', gap: 8, alignItems: 'center' }}>
-                    <span style={{ fontSize: 18 }}>{m.icon}</span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700, color: 'var(--black)' }}>{m.title}</div>
-                      <div style={{ fontSize: 11, color: 'var(--gray-400)' }}>{m.sub} · {m.size}</div>
-                    </div>
-                    {modelStatus[m.id] !== undefined && (
-                      <span style={{ fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 99,
-                        background: modelStatus[m.id] ? '#f0fdf4' : '#fef2f2',
-                        color:      modelStatus[m.id] ? '#16a34a' : '#dc2626',
-                        border:     `1px solid ${modelStatus[m.id] ? '#86efac' : '#fca5a5'}` }}>
-                        {modelStatus[m.id] ? '✓ OK' : '✗ Missing'}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ position: 'relative', background: '#0d1117', padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <code style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 11, color: '#79c0ff' }}>{m.cmd}</code>
-                    <button className="copy-btn" style={{ position:'static' }} onClick={() => copy(m.id, m.cmd)}>{copied===m.id?'✓':'Copy'}</button>
-                  </div>
+            
+            <div style={{ padding: '16px 22px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div style={{ background: 'var(--gray-50)', border: '1px solid var(--gray-200)', borderRadius: 12, padding: '14px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                  <span style={{ fontSize: 16 }}>🗄️</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--black)' }}>Standardized Caching Path</span>
                 </div>
-              ))}
-            </div>
-            <div style={{ padding: '0 22px 22px' }}>
-              <button onClick={checkOllama} disabled={checking}
-                style={{ width:'100%', padding:'10px', border:'1.5px solid var(--gray-200)', borderRadius:10, background:'var(--white)', fontSize:13, fontWeight:600, color:checking?'var(--gray-400)':'var(--black)', cursor:checking?'wait':'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:6, fontFamily:'var(--font)' }}>
-                {checking?<><span style={{ display:'inline-block', animation:'spin 1s linear infinite' }}>⟳</span> Checking…</>:'🔍 Verify Installation'}
-              </button>
-              {ollamaOk !== null && (
-                <div style={{ marginTop:10, background: ollamaOk?'#f0fdf4':'#fef2f2', border:`1px solid ${ollamaOk?'#86efac':'#fca5a5'}`, borderRadius:10, padding:'10px 14px' }}>
-                  <div style={{ fontSize:12.5, fontWeight:700, color: ollamaOk?'#15803d':'#b91c1c', marginBottom: ollamaOk?8:0 }}>
-                    {ollamaOk?'✓ Ollama running':'✗ Run: ollama serve'}
-                  </div>
-                  {ollamaOk && (
-                    <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
-                      {MODELS.map(m => (
-                        <span key={m.id} style={{ fontSize:11, fontWeight:700, padding:'2px 9px', borderRadius:99, background: modelStatus[m.id]?'#dcfce7':'#fee2e2', color: modelStatus[m.id]?'#15803d':'#b91c1c', border:`1px solid ${modelStatus[m.id]?'#86efac':'#fca5a5'}` }}>
-                          {modelStatus[m.id]?'✓':'✗'} {m.title.split(':')[0]}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+                <code style={{ display: 'block', padding: '8px 10px', background: 'var(--white)', border: '1px dashed var(--gray-300)', borderRadius: 6, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--gray-600)', wordBreak: 'break-all' }}>
+                  C:\Users\%USERNAME%\.dev-clash\data
+                </code>
+                <p style={{ margin: '10px 0 0', fontSize: 11.5, color: 'var(--gray-500)', lineHeight: 1.5 }}>
+                  Because embeddings are cached universally, any AI agent (like Cursor or Claude) can access your codebase knowledge graph instantly—zero external API costs.
+                </p>
+              </div>
             </div>
           </div>
 
