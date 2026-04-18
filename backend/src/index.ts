@@ -501,6 +501,43 @@ app.post('/api/mcp', async (req, res) => {
     }
 });
 
+// ─── POST /api/notify-changes ────────────────────────────────────────────────
+// HTTP endpoint for non-MCP agents (Cursor, scripts, CI hooks) to trigger
+// incremental memory sync for specific changed files.
+// Body: { files: string[] }   — array of absolute file paths that were edited
+
+app.post('/api/notify-changes', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Body must be JSON with a "files" array.' });
+    }
+    const { files } = req.body as { files?: string[] };
+
+    if (!Array.isArray(files) || files.length === 0) {
+        return res.status(400).json({ error: '"files" must be a non-empty array of absolute paths.' });
+    }
+
+    const results: { file: string; status: string; summary?: string }[] = [];
+
+    for (const filePath of files.slice(0, 20)) { // cap at 20 files per call
+        try {
+            const result = await executeMcpTool(
+                'update_file_context',
+                { filePath, changeDescription: 'Updated by AI agent via /api/notify-changes' },
+                getLastGlobalSummary(),
+            );
+            results.push({ file: path.basename(filePath), status: 'synced', summary: result.split('\n').find(l => l.startsWith('**Operation:**')) ?? '' });
+        } catch (err: any) {
+            results.push({ file: path.basename(filePath), status: 'error: ' + err.message });
+        }
+    }
+
+    res.json({
+        success: true,
+        message: `Incremental memory sync complete for ${results.length} file(s).`,
+        results,
+    });
+});
+
 // ─── Boot ──────────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT ?? 3001);
@@ -517,8 +554,9 @@ app.listen(PORT, () => {
     console.log('    POST /api/query         → Semantic search + Gemini RAG');
     console.log('    POST /api/query/stream  → Same, streamed over SSE');
     console.log('  Agent / MCP Endpoints:');
-    console.log('    POST /api/agent-sync    → HTTP context bridge for any AI agent');
-    console.log('    POST /api/mcp           → Full MCP protocol (Claude Desktop, Cursor)');
+    console.log('    POST /api/agent-sync       → HTTP context bridge for any AI agent');
+    console.log('    POST /api/mcp              → Full MCP protocol (Claude Desktop, Cursor)');
+    console.log('    POST /api/notify-changes   → Incremental memory sync for edited files');
     console.log('  FileSystem Endpoints:');
     console.log('    GET  /api/fs/read       → Read raw file content');
     console.log('    GET  /api/fs/list       → List directory contents');

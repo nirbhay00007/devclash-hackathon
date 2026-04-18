@@ -45,6 +45,18 @@ async function run() {
     await check('/api/status has javaBackend',   async () => { const {data:d} = await get('/api/status'); if (!d.javaBackend || typeof d.javaBackend.status !== 'string') throw new Error('missing javaBackend'); });
     await check('/api/status isPipelineIdle',    async () => { const {data:d} = await get('/api/status'); if (typeof d.pipelineRunning !== 'boolean') throw new Error('missing pipelineRunning'); });
 
+    // ── Warm-up: reload cached repo so graph/vector tests are stable ──────────
+    console.log('\n[SETUP] Loading cached repo into memory...');
+    const CACHED_REPO = 'C:/College/DEV_CLASH/backend/repos/spring-petclinic_1776513993551';
+    let warmUpOk = false;
+    try {
+        const wu = await post('/api/load', { targetPath: CACHED_REPO });
+        warmUpOk = wu.data.success === true;
+        console.log(`  ✅  Loaded ${wu.data.vectorCount ?? 0} vectors, ${wu.data.data?.nodes?.length ?? 0} nodes from cache`);
+    } catch (e) {
+        console.log(`  ⚠️  Cache load failed (${e.message}) — graph/query tests will be skipped`);
+    }
+
     // ── Layer 2: Graph Data ──────────────────────────────────────────────────
     console.log('\n[2/8] GRAPH DATA');
     let graphData;
@@ -84,11 +96,12 @@ async function run() {
     let toolsList;
     await check('MCP initialize returns serverInfo',  async () => { const {data:d} = await post('/api/mcp', { jsonrpc:'2.0', method:'initialize', id:1 }); if (!d.result?.serverInfo?.name) throw new Error('no serverInfo'); });
     await check('MCP initialize returns protocolVersion', async () => { const {data:d} = await post('/api/mcp', { jsonrpc:'2.0', method:'initialize', id:2 }); if (!d.result?.protocolVersion) throw new Error('no protocolVersion'); });
-    await check('MCP tools/list returns 4 tools',    async () => { const {data:d} = await post('/api/mcp', { jsonrpc:'2.0', method:'tools/list', id:3 }); toolsList = d.result?.tools; if (toolsList?.length !== 4) throw new Error(`Expected 4, got ${toolsList?.length}`); });
+    await check('MCP tools/list returns 5 tools',    async () => { const {data:d} = await post('/api/mcp', { jsonrpc:'2.0', method:'tools/list', id:3 }); toolsList = d.result?.tools; if (toolsList?.length !== 5) throw new Error(`Expected 5, got ${toolsList?.length}`); });
     await check('MCP tool search_codebase present',  async () => { if (!toolsList?.find(t => t.name === 'search_codebase')) throw new Error('missing tool'); });
     await check('MCP tool get_architecture_summary', async () => { if (!toolsList?.find(t => t.name === 'get_architecture_summary')) throw new Error('missing tool'); });
     await check('MCP tool get_file_context present', async () => { if (!toolsList?.find(t => t.name === 'get_file_context')) throw new Error('missing tool'); });
     await check('MCP tool get_dependency_graph',     async () => { if (!toolsList?.find(t => t.name === 'get_dependency_graph')) throw new Error('missing tool'); });
+    await check('MCP tool update_file_context',      async () => { if (!toolsList?.find(t => t.name === 'update_file_context')) throw new Error('missing tool — incremental sync tool'); });
     await check('MCP tools/call returns text content', async () => {
         const {data:d} = await post('/api/mcp', { jsonrpc:'2.0', method:'tools/call', params:{ name:'search_codebase', arguments:{ task:'database and repositories' } }, id:4 });
         if (d.result?.content?.[0]?.type !== 'text') throw new Error('wrong content type');
@@ -101,6 +114,15 @@ async function run() {
     await check('MCP notifications/initialized returns 204', async () => {
         const r = await fetch(`${BASE}/api/mcp`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ jsonrpc:'2.0', method:'notifications/initialized' }) });
         if (r.status !== 204) throw new Error(`Expected 204, got ${r.status}`);
+    });
+    await check('/api/notify-changes missing files → 400', async () => {
+        const r = await fetch(`${BASE}/api/notify-changes`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+        if (r.ok) throw new Error('should 400');
+    });
+    await check('/api/notify-changes processes files array', async () => {
+        const {data:d} = await post('/api/notify-changes', { files: ['C:/College/DEV_CLASH/backend/package.json'] });
+        if (!d.success) throw new Error('success=false');
+        if (!Array.isArray(d.results)) throw new Error('no results array');
     });
     console.log(`     Tools: ${toolsList?.map(t => t.name).join(', ')}`);
 

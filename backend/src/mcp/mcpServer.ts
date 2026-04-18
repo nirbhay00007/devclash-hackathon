@@ -17,9 +17,11 @@
  *   See setup/CLAUDE_INTEGRATION.md for connecting Claude Desktop.
  */
 
-import { semanticSearch, SearchResult } from '../storage/vectorStore';
+import { semanticSearch, SearchResult, upsertDocument, buildCompositeText } from '../storage/vectorStore';
 import { globalGraph, NodeMetadata, Edge } from '../storage/graphStore';
+import { summarizeFile } from '../ai/ollamaSummarizer';
 import path from 'path';
+import fs from 'fs';
 
 // ─── Tool Definitions ─────────────────────────────────────────────────────────
 // These are the tools Claude/Cursor sees in its tool-calling interface.
@@ -84,6 +86,29 @@ export const MCP_TOOLS = [
                 filePath: {
                     type: 'string',
                     description: 'The absolute file path or basename to get dependencies for.',
+                },
+            },
+            required: ['filePath'],
+        },
+    },
+    {
+        name: 'update_file_context',
+        description:
+            'IMPORTANT: Call this tool immediately after editing any file. ' +
+            'It re-summarizes the modified file using local AI and updates the permanent ' +
+            'local memory index so all future queries reflect your changes. ' +
+            'This keeps the DEV_CLASH memory in sync without a full re-analysis, ' +
+            'saving thousands of tokens on future sessions.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                filePath: {
+                    type: 'string',
+                    description: 'The absolute path to the file that was just edited.',
+                },
+                changeDescription: {
+                    type: 'string',
+                    description: 'Brief description of what you changed (used to enrich the memory entry).',
                 },
             },
             required: ['filePath'],
@@ -235,6 +260,100 @@ export async function executeMcpTool(
                 : '- None (this file has no local imports)';
 
             return md;
+        }
+
+        // ── Tool 5: update_file_context ───────────────────────────────────────
+        // Called by AI agents immediately after editing a file.
+        // Re-summarizes the file and upserts into the local vector store so
+        // all future queries reflect the change — zero full re-analysis cost.
+        case 'update_file_context': {
+            const filePath = String(input.filePath ?? '').trim();
+            const changeDesc = String(input.changeDescription ?? '').trim();
+
+            if (!filePath) return 'Error: filePath is required.';
+
+            // 1. Verify file exists on disk
+            if (!fs.existsSync(filePath)) {
+                return `Error: File not found on disk: "${filePath}". Make sure the path is absolute.`;
+            }
+
+            const stat = fs.statSync(filePath);
+            if (stat.isDirectory()) return `Error: "${filePath}" is a directory, not a file.`;
+            if (stat.size > 5 * 1024 * 1024) return `Error: File exceeds 5MB limit: ${filePath}`;
+
+            const fileBasename = path.basename(filePath);
+
+            // 2. Re-summarize with local Ollama (reads the file itself, lightweight)
+            let freshSummary: Awaited<ReturnType<typeof summarizeFile>>;
+            try {
+                freshSummary = await summarizeFile(filePath);
+            } catch (err: any) {
+                return `Error: Ollama summarization failed: ${err?.message ?? err}. Is Ollama running?`;
+            }
+
+            // 3. Update the in-memory graph node if it exists
+            const existingNode = globalGraph.getNode(filePath);
+            if (existingNode) {
+                globalGraph.addNode({
+                    ...existingNode,
+                    summary:        freshSummary.summary,
+                    responsibility: freshSummary.responsibility,
+                    keyExports:     freshSummary.key_exports,
+                    internalCalls:  freshSummary.internal_calls,
+                    complexity:     freshSummary.complexity as any,
+                    patterns:       freshSummary.patterns,
+                    externalDeps:   freshSummary.external_deps,
+                    codeQuality:    freshSummary.code_quality as any,
+                    layer:          freshSummary.layer as any,
+                    isEntryPoint:   freshSummary.is_entry_point,
+                });
+            }
+
+            // 4. Build enriched composite text (includes the change description if given)
+            const compositeText = buildCompositeText(
+                filePath,
+                changeDesc ? `${freshSummary.summary} [Recently changed: ${changeDesc}]` : freshSummary.summary,
+                freshSummary.key_exports,
+                freshSummary.patterns,
+                freshSummary.external_deps,
+                freshSummary.complexity,
+                freshSummary.is_entry_point,
+                freshSummary.responsibility,
+                freshSummary.internal_calls,
+                [],
+            );
+
+            // 5. Upsert into the vector store (replaces old embedding, persists to disk)
+            const operation = await upsertDocument({
+                filePath,
+                fileBasename,
+                compositeText,
+                summary:        freshSummary.summary,
+                responsibility: freshSummary.responsibility,
+                keyExports:     freshSummary.key_exports,
+                internalCalls:  freshSummary.internal_calls,
+                patterns:       freshSummary.patterns,
+                externalDeps:   freshSummary.external_deps,
+                complexity:     freshSummary.complexity,
+                isEntryPoint:   freshSummary.is_entry_point,
+            });
+
+            return [
+                `# ✅ Memory Sync Complete — ${fileBasename}`,
+                ``,
+                `**Operation:** ${operation} (vector embedding refreshed)`,
+                `**File:** \`${filePath}\``,
+                changeDesc ? `**Change noted:** ${changeDesc}` : '',
+                ``,
+                `## New AI Summary`,
+                freshSummary.summary,
+                ``,
+                `## Updated Responsibility`,
+                freshSummary.responsibility,
+                ``,
+                `> The local DEV_CLASH memory has been updated. Future queries about this file`,
+                `> will reflect your changes without re-analyzing the full repository.`,
+            ].filter(Boolean).join('\n');
         }
 
         default:

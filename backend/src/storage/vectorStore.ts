@@ -75,6 +75,40 @@ export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>) {
     }
 }
 
+/**
+ * Upsert (insert-or-replace) a single document in the in-memory vector store.
+ * Used by the incremental memory sync (update_file_context MCP tool) so that
+ * when an AI agent edits a file it can re-embed just that one entry without
+ * running the entire ingestion pipeline.
+ *
+ * Steps:
+ *   1. Remove the old entry for filePath if it exists.
+ *   2. Re-embed the new compositeText using Ollama nomic-embed-text.
+ *   3. Insert the updated doc.
+ *   4. Persist the updated store to disk immediately.
+ */
+export async function upsertDocument(doc: Omit<RichVectorDoc, 'vector'>): Promise<'updated' | 'inserted' | 'error'> {
+    // Remove stale entry
+    const prevIdx = _docs.findIndex(d => d.filePath === doc.filePath);
+    if (prevIdx !== -1) _docs.splice(prevIdx, 1);
+
+    try {
+        const response = await ollama.embeddings({
+            model: 'nomic-embed-text',
+            prompt: doc.compositeText,
+        });
+        _docs.push({ ...doc, vector: response.embedding });
+    } catch (err: any) {
+        console.warn(`[VectorStore] Upsert embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
+        _docs.push({ ...doc, vector: [] }); // keyword fallback still works
+    }
+
+    // Persist immediately so the update survives restarts
+    try { getStore().saveVectors(_docs); } catch {}
+
+    return prevIdx !== -1 ? 'updated' : 'inserted';
+}
+
 // ─── Math helpers ─────────────────────────────────────────────────────────────
 
 function dot(A: number[], B: number[]): number {
