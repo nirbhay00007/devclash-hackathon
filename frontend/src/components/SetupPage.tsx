@@ -69,8 +69,8 @@ export default function SetupPage() {
     setTimeout(() => {
       setDownloading(false);
       const link = document.createElement('a');
-      link.href = '/CodeMap_Installer.js';
-      link.download = 'CodeMap_Installer.js';
+      link.href = '/CodeMap_Installer.exe';
+      link.download = 'CodeMap_Installer.exe';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
