@@ -24,6 +24,7 @@ export interface RepoMeta {
     analyzedAt: string;      // ISO timestamp
     fileCount: number;
     durationMs: number;
+    language?: string;       // Detected language (typescript, javascript, java, python…)
 }
 
 export interface PersistedGraph {

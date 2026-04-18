@@ -4,11 +4,12 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { exec } from 'child_process';
-import { runIngestionPipeline, getLastGlobalSummary, isPipelineRunning } from './core/pipeline';
+import { runIngestionPipeline, getLastGlobalSummary, isPipelineRunning, PipelineOptions } from './core/pipeline';
 import { globalGraph } from './storage/graphStore';
 import { semanticSearch, initVectorStore } from './storage/vectorStore';
 import { askGeminiArchitect } from './ai/geminiIntelligence';
 import { initStore } from './storage/persistentStore';
+import { isJavaBackendAlive } from './core/javaBackendClient';
 
 dotenv.config();
 
@@ -21,25 +22,59 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ─── Health Check ──────────────────────────────────────────────────────────────
+// ─── Health Check ───────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// ─── POST /api/analyze ─────────────────────────────────────────────────────────
-// Triggers the full ingestion pipeline with SSE progress streaming.
-// Response is SSE (text/event-stream) — each event is a JSON progress update.
-// The final `done` event contains the full graph payload.
+// ─── GET /api/status ───────────────────────────────────────────────────
+// Reports health of both microservices (Node ML + Java AST backend).
+
+app.get('/api/status', async (_req, res) => {
+    const javaAlive = await isJavaBackendAlive();
+    res.json({
+        nodeBackend:  { status: 'ok',                    port: process.env.PORT ?? 3001 },
+        javaBackend:  { status: javaAlive ? 'ok' : 'offline', port: process.env.JAVA_BACKEND_PORT ?? 8080 },
+        pipelineRunning: isPipelineRunning(),
+        timestamp: new Date().toISOString(),
+    });
+});
+
+// ─── POST /api/analyze ───────────────────────────────────────────────────
+// Accepts:
+//   { targetPath: string }  — local TS/JS repo scan
+//   { repoUrl: string }     — GitHub Java repo (clones via Spring Boot)
 
 app.post('/api/analyze', async (req, res) => {
     if (isPipelineRunning()) {
         return res.status(409).json({ error: 'Pipeline is already running. Please wait.' });
     }
 
-    const targetPath = req.body.targetPath
-        ? path.resolve(req.body.targetPath)
-        : path.resolve(__dirname, '../../');
+    let { targetPath, repoUrl, language } = req.body;
+
+    // Graceful fallback: If the frontend sends a URL inside targetPath, intercept it
+    if (targetPath && typeof targetPath === 'string') {
+        const cleaned = targetPath.trim();
+        if (cleaned.startsWith('http://') || cleaned.startsWith('https://')) {
+            repoUrl = cleaned;
+            targetPath = undefined;
+        } else {
+            targetPath = cleaned;
+        }
+    }
+
+    if (!targetPath && !repoUrl) {
+        return res.status(400).json({
+            error: 'Provide either "targetPath" (local repo) or "repoUrl" (GitHub Java repo).',
+        });
+    }
+
+    const options: PipelineOptions = {
+        targetPath: targetPath ? path.resolve(targetPath) : undefined,
+        repoUrl:    repoUrl   ?? undefined,
+        language:   language  ?? 'auto',
+    };
 
     // Set up SSE
     res.setHeader('Content-Type', 'text/event-stream');
@@ -48,10 +83,9 @@ app.post('/api/analyze', async (req, res) => {
     res.flushHeaders();
 
     try {
-        await runIngestionPipeline(targetPath, res);
+        await runIngestionPipeline(options, res);
 
-        // Send the final graph as the last SSE event
-        const graphData = globalGraph.exportForReactFlow();
+        const graphData    = globalGraph.exportForReactFlow();
         const globalSummary = getLastGlobalSummary();
 
         res.write(`data: ${JSON.stringify({
@@ -237,14 +271,21 @@ app.post('/api/query/stream', async (req, res) => {
         const subGraph = searchResults.map(r => {
             const node = globalGraph.getNode(r.filePath);
             return {
-                filePath: r.filePath,
+                filePath:       r.filePath,
                 relevanceScore: r.score,
-                summary: r.summary,
-                complexity: node?.complexity ?? 'unknown',
-                patterns: node?.patterns ?? [],
-                keyExports: node?.keyExports ?? [],
-                fanIn: node?.inboundEdgeCount ?? 0,
-                risk: node?.riskCategory ?? 'unknown',
+                summary:        r.summary,
+                responsibility: r.responsibility,
+                complexity:     r.complexity,
+                codeQuality:    node?.codeQuality   ?? 'acceptable',
+                layer:          node?.layer         ?? 'unknown',
+                patterns:       r.patterns,
+                keyExports:     r.keyExports,
+                internalCalls:  r.internalCalls,
+                fanIn:          node?.inboundEdgeCount  ?? 0,
+                fanOut:         node?.outboundEdgeCount ?? 0,
+                risk:           node?.riskCategory  ?? 'unknown',
+                isOrphan:       node?.isOrphan       ?? false,
+                commitChurn:    node?.commitChurn    ?? 0,
             };
         });
 
@@ -353,16 +394,18 @@ const PORT = Number(process.env.PORT ?? 3001);
 app.listen(PORT, () => {
     console.log('════════════════════════════════════════════');
     console.log(`  DEV_CLASH Backend API — Port ${PORT}`);
+    console.log(`  Java AST Backend expected at port ${process.env.JAVA_BACKEND_PORT ?? 8080}`);
     console.log('  Endpoints:');
-    console.log('    POST /api/analyze       → Full ingestion pipeline (SSE)');
-    console.log('    POST /api/load          → Reload repo from .dev-clash/ cache (instant)');
+    console.log('    GET  /api/status        → Health of Node + Java microservices');
+    console.log('    POST /api/analyze       → Full ingestion: { targetPath } or { repoUrl }');
+    console.log('    POST /api/load          → Reload from .dev-clash/ cache (instant)');
     console.log('    GET  /api/graph         → Current in-memory graph snapshot');
     console.log('    GET  /api/summary       → Gemini global repo summary');
     console.log('    POST /api/query         → Semantic search + Gemini RAG');
     console.log('    POST /api/query/stream  → Same, streamed over SSE');
     console.log('    GET  /api/fs/read       → Read raw file content');
     console.log('    GET  /api/fs/list       → List directory contents');
-    console.log('    POST /api/fs/open       → Open file/folder in VS Code or default OS app');
+    console.log('    POST /api/fs/open       → Open in VS Code / default OS app');
     console.log('    GET  /health            → Health check');
     console.log('════════════════════════════════════════════');
 });
