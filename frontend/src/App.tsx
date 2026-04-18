@@ -46,8 +46,17 @@ let colorIdx = 0;
 const nextColor = () => REPO_COLORS[colorIdx++ % REPO_COLORS.length];
 
 function makeRepo(path: string): RepoEntry {
-  const label = path.split(/[/\\]/).filter(Boolean).pop() ?? path;
-  return { id: crypto.randomUUID(), path, label, color: nextColor(), status: 'idle', progress: 0, log: [], nodes: [], edges: [], summary: null };
+  let cleanPath = path.trim();
+  // Sanitize GitHub/GitLab URLs by stripping out deep paths like /tree/master or /blob/main
+  const match = cleanPath.match(/^(https?:\/\/(?:github\.com|gitlab\.com|bitbucket\.org)\/[^\/]+\/[^\/]+)/i);
+  if (match) {
+    cleanPath = match[1].replace(/\.git\s*$/, '');
+  } else {
+    cleanPath = cleanPath.replace(/\.git\s*$/, '');
+  }
+
+  const label = cleanPath.split(/[/\\]/).filter(Boolean).pop() ?? cleanPath;
+  return { id: crypto.randomUUID(), path: cleanPath, label, color: nextColor(), status: 'idle', progress: 0, log: [], nodes: [], edges: [], summary: null };
 }
 
 
