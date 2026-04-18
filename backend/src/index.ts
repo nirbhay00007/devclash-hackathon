@@ -10,6 +10,7 @@ import { semanticSearch, initVectorStore } from './storage/vectorStore';
 import { askGeminiArchitect } from './ai/geminiIntelligence';
 import { initStore } from './storage/persistentStore';
 import { isJavaBackendAlive } from './core/javaBackendClient';
+import { MCP_TOOLS, executeMcpTool } from './mcp/mcpServer';
 
 dotenv.config();
 
@@ -404,14 +405,110 @@ app.post('/api/fs/open', (req, res) => {
     }
 });
 
+// ─── POST /api/agent-sync ─────────────────────────────────────────────────────
+// HTTP bridge for AI agents (Cursor, Devin, CLI scripts, custom agents).
+// Returns a prompt-ready Markdown context block for a given task description.
+// Body: { task: string, maxResults?: number }
+
+app.post('/api/agent-sync', async (req, res) => {
+    if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({ error: 'Body must be JSON with a "task" field.' });
+    }
+    const { task, maxResults = 6 } = req.body as { task?: string; maxResults?: number };
+
+    if (!task || typeof task !== 'string' || task.trim().length === 0) {
+        return res.status(400).json({ error: '"task" field is required and must be a non-empty string.' });
+    }
+
+    try {
+        const context = await executeMcpTool('search_codebase', { task: task.trim(), maxResults }, getLastGlobalSummary());
+        const nodes = globalGraph.getAllNodes();
+
+        res.json({
+            success: true,
+            task: task.trim(),
+            optimized_prompt_context: context,
+            token_estimate: Math.round(context.length / 4),
+            files_searched: nodes.length,
+            instructions: [
+                'Paste the `optimized_prompt_context` into your agent\'s system prompt or prepend it to your user message.',
+                'The context is pre-summarized by local AI — no need to read raw files for these components.',
+                'For more detail on any file, call: POST /api/query { query: "<filename>" }',
+            ],
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── POST /api/mcp ────────────────────────────────────────────────────────────
+// Full MCP (Model Context Protocol) endpoint for Claude Desktop, Cursor, etc.
+// Implements the MCP JSON-RPC 2.0 protocol natively.
+//
+// Supported methods:
+//   initialize            → Handshake: returns server info + capabilities
+//   tools/list            → Returns full tool catalog (search_codebase, etc.)
+//   tools/call            → Executes a named tool and returns the result
+
+app.post('/api/mcp', async (req, res) => {
+    const { jsonrpc, method, params, id } = req.body ?? {};
+
+    const success = (result: any) => res.json({ jsonrpc: '2.0', id, result });
+    const error   = (code: number, message: string) =>
+        res.status(400).json({ jsonrpc: '2.0', id, error: { code, message } });
+
+    try {
+        switch (method) {
+
+            // ── Handshake ────────────────────────────────────────────────────
+            case 'initialize':
+                return success({
+                    protocolVersion: '2024-11-05',
+                    serverInfo: {
+                        name:    'dev-clash-memory',
+                        version: '0.0.2',
+                    },
+                    capabilities: { tools: {} },
+                });
+
+            // ── Tool list ────────────────────────────────────────────────────
+            case 'tools/list':
+                return success({ tools: MCP_TOOLS });
+
+            // ── Tool execution ───────────────────────────────────────────────
+            case 'tools/call': {
+                const toolName = params?.name as string;
+                const toolInput = (params?.arguments ?? {}) as Record<string, any>;
+
+                if (!toolName) return error(-32602, 'Missing tool name in params.name');
+
+                const result = await executeMcpTool(toolName, toolInput, getLastGlobalSummary());
+                return success({
+                    content: [{ type: 'text', text: result }],
+                    isError: false,
+                });
+            }
+
+            // ── Notifications (fire-and-forget, no response needed) ──────────
+            case 'notifications/initialized':
+                return res.status(204).end();
+
+            default:
+                return error(-32601, `Method not found: ${method}`);
+        }
+    } catch (err: any) {
+        return error(-32603, `Internal error: ${err.message}`);
+    }
+});
+
 // ─── Boot ──────────────────────────────────────────────────────────────────────
 
 const PORT = Number(process.env.PORT ?? 3001);
 app.listen(PORT, () => {
-    console.log('════════════════════════════════════════════');
+    console.log('════════════════════════════════════════════════════════════');
     console.log(`  DEV_CLASH Backend API — Port ${PORT}`);
     console.log(`  Java AST Backend expected at port ${process.env.JAVA_BACKEND_PORT ?? 8080}`);
-    console.log('  Endpoints:');
+    console.log('  Core Endpoints:');
     console.log('    GET  /api/status        → Health of Node + Java microservices');
     console.log('    POST /api/analyze       → Full ingestion: { targetPath } or { repoUrl }');
     console.log('    POST /api/load          → Reload from .dev-clash/ cache (instant)');
@@ -419,9 +516,13 @@ app.listen(PORT, () => {
     console.log('    GET  /api/summary       → Gemini global repo summary');
     console.log('    POST /api/query         → Semantic search + Gemini RAG');
     console.log('    POST /api/query/stream  → Same, streamed over SSE');
+    console.log('  Agent / MCP Endpoints:');
+    console.log('    POST /api/agent-sync    → HTTP context bridge for any AI agent');
+    console.log('    POST /api/mcp           → Full MCP protocol (Claude Desktop, Cursor)');
+    console.log('  FileSystem Endpoints:');
     console.log('    GET  /api/fs/read       → Read raw file content');
     console.log('    GET  /api/fs/list       → List directory contents');
     console.log('    POST /api/fs/open       → Open in VS Code / default OS app');
     console.log('    GET  /health            → Health check');
-    console.log('════════════════════════════════════════════');
+    console.log('════════════════════════════════════════════════════════════');
 });
