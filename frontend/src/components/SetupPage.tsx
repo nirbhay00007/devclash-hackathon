@@ -68,8 +68,13 @@ export default function SetupPage() {
     setDownloading(true);
     setTimeout(() => {
       setDownloading(false);
-      alert('In a production environment, this would start downloading CodeMap_Installer.exe');
-    }, 1500);
+      const link = document.createElement('a');
+      link.href = '/CodeMap_Installer.js';
+      link.download = 'CodeMap_Installer.js';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }, 800);
   };
 
   const ag = AGENTS[agent];
