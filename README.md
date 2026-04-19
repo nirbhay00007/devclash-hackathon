@@ -1,51 +1,51 @@
-# CodeMap AI: Visualize the invisible
+# DevClash AI: The Ultimate Codebase Architect 🚀
 
-**Local AI · Zero Cloud · Full Privacy**
+**Visualize the Invisible · Local AI Powered · Cross-Repo Intelligence**
 
-Transform complex codebases into interactive architectural maps. Understand dependencies, logic paths, and architectural intent — powered by local Ollama models and Gemini AI.
+DevClash AI transforms complex, multi-repository codebases into interactive, navigable architectural maps. Understand deep dependency chains, architectural intent, and cross-repo relationships in real-time — powered by local Ollama models and Gemini AI.
 
-## 🚀 Features
+![Hero Showcase](https://via.placeholder.com/1200x600/1a1a1a/ffffff?text=DevClash+Architecture+Graph+v0.0.9)
 
-- **Automated Dependency Mapping**: Trace import graphs automatically. Discover dead paths, critical execution loops, and fan-in/out metrics without manual stepping.
-- **AI Intent Mapping**: Extract functional intent from legacy code blocks. Translate dense monoliths into readable domain concepts using local Ollama AI (Qwen2.5 Coder).
-- **Dependency Risk Analysis**: Identify cyclical dependencies and high-risk modules. Visualize technical debt impact before refactoring.
-- **Semantic RAG Search**: Ask questions in plain English. Vector search + Gemini AI returns exactly the files relevant to your task in milliseconds.
-- **MCP Agent Integration**: Connect Claude Desktop, Cursor, or Antigravity. Your AI agent gets permanent codebase memory with ~90% fewer tokens.
-- **Multi-Repo Merging**: Analyze frontend + backend + microservices simultaneously. Visualize cross-repository dependency relationships in one unified graph with an advanced radial cluster layout.
+## 🌟 Key Features (v0.0.9)
 
-## 🏗️ Architecture
+- **🔄 Multi-Repository Merging**: The first tool to visualize frontend, backend, and microservices in a single, unified radial cluster layout. Trace calls from a React frontend all the way to a Java Spring Boot backend.
+- **🏠 100% Local Ingestion (Ollama)**: Phase 1 & 2 analysis (summarization and embedding) now runs entirely on your local GPU/CPU using `qwen2.5-coder` and `nomic-embed-text`. Zero API costs and total privacy for your source code.
+- **🧠 Hybrid Semantic RAG**: Combining the speed of local vector search with the reasoning power of Gemini AI. Ask complex architectural questions and get synthesized, multi-file answers.
+- **⚡ Hot-Reload Persistence**: The backend now automatically recovers its state on startup. Editing your environment variables or restarting the server no longer wipes your analysis.
+- **🤖 MCP native Server**: Built-in Model Context Protocol support. Plug DevClash directly into **Cursor**, **Claude Desktop**, or **Antigravity** to give your AI agents permanent codebase memory with 90% fewer tokens.
 
-CodeMap AI consists of three core components running locally:
-1. **Frontend (`frontend_merged/`)**: A React 19 + Vite application using `@xyflow/react` and `@dagrejs/dagre` for the interactive node-based architecture graph.
-2. **Backend Engine (`backend/`)**: A Node.js ML pipeline handling the Model Context Protocol (MCP) server, file orchestration, AST aggregation, and semantic embedding.
-3. **Java AST Parser (`java-backend/`)**: A Spring Boot service using JavaParser to accurately extract class graphs and method-level symbols from Java repositories.
+## 🏗️ The Tech Stack
 
-## ⚙️ Setup & Installation
+DevClash is built for scale and speed:
+- **Frontend**: React 19, TypeScript, Vite, @xyflow/react (React Flow).
+- **ML Backend**: Node.js, Express, Ollama (Local LLM), ChromaDB (Local Vector Store).
+- **Core Parser**: Custom Java AST Parser (Spring Boot + JavaParser) & TypeScript AST Extraction.
 
-CodeMap AI runs entirely on your local machine. Your code never leaves your device.
+## ⚙️ Quick Start
 
 1. **Prerequisites**: 
    - Node.js 18+
-   - Java 17+
-   - [Ollama](https://ollama.ai) installed locally.
+   - Java 17+ (for Java repo support)
+   - [Ollama](https://ollama.ai) installed.
 
-2. **Pull Required Local AI Models**:
+2. **Setup AI Models**:
    ```bash
    ollama pull qwen2.5-coder:3b
    ollama pull nomic-embed-text
    ```
 
-3. **Start the Application**:
-   We provide easy-to-use launch scripts that install dependencies and boot all three services simultaneously. Ensure you have an `.env` file with your `GEMINI_API_KEY` present.
-   - On **Windows**: Run `start.bat`
-   - On **Mac/Linux**: Run `./start.sh`
+3. **Launch**:
+   - **Windows**: Run `start.bat`
+   - **Mac/Linux**: Run `./start.sh`
 
-Navigate to `http://localhost:5173` to explore your codebase!
+Navigate to `http://localhost:5173` to begin your architectural journey.
 
-## 🤖 MCP Tool Integration
-Configure your AI agent (Claude Desktop, Cursor IDE) with the native HTTP/MCP endpoints to give it full project memory. CodeMap AI exposes:
-- `search_codebase`: Semantic search over all indexed files.
-- `get_architecture_summary`: High-level repo overview & tech stack.
-- `get_file_context`: AI summary for a file — cheaper than raw reads.
-- `get_dependency_graph`: Fan-in/fan-out graph — who imports what.
-- `update_file_context`: Re-embeds a file after editing, keeping memory fresh.
+## 🤝 Contribution & License
+
+Created for the **DevClash Hackathon 2024**. 
+
+**Default Branch**: `end-of-hackathon`
+**Version**: `v0.0.9`
+
+---
+*Built with ❤️ by the DevClash Team (Nirbhay Langote & Antigravity AI)*
