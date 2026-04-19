@@ -678,6 +678,48 @@ body {
   z-index: 10;
   box-shadow: var(--shadow-md);
 }
+.btn-reset-graph {
+  transition: all 0.2s ease;
+}
+.btn-reset-graph:hover svg {
+  transform: rotate(-180deg);
+  transition: transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* ─── REPO GROUPS ────────────────────────────────────────────────────────────── */
+.repo-group-node {
+  border: 1px dashed transparent;
+  border-radius: 20px;
+  pointer-events: none; /* Let clicks pass through to sub-elements */
+  transition: all 0.3s ease;
+  z-index: -10;
+  position: relative;
+}
+.repo-group-header {
+  position: absolute;
+  top: -14px;
+  left: 30px;
+  padding: 4px 14px;
+  background: white;
+  border: 1px solid;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  color: #1a1a1a;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  box-shadow: var(--shadow-sm);
+  z-index: 10;
+}
+.repo-group-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
 .go-title {
   font-size: 12px;
   font-weight: 700;

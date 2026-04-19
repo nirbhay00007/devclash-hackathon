@@ -6,6 +6,7 @@ interface RepoEntry {
   label: string;
   color: string;
   status: 'idle' | 'running' | 'done' | 'error';
+  progress: number;
   totalFiles: number;
   log: string[];
   nodes: { id: string }[];

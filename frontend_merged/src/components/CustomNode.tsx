@@ -1,10 +1,6 @@
 import { Handle, Position } from '@xyflow/react';
 
-const RISK_STYLE: Record<string, { bg: string; color: string; border: string; label: string }> = {
-  high:   { bg: '#fef2f2', color: '#ef4444', border: '#fca5a5', label: 'High'   },
-  medium: { bg: '#fffbeb', color: '#d97706', border: '#fde68a', label: 'Med'    },
-  low:    { bg: '#f0fdf4', color: '#16a34a', border: '#86efac', label: 'Low'    },
-};
+
 
 const LAYER_ICON: Record<string, string> = {
   presentation: '🖼', business_logic: '⚙️', data_access: '🗄',

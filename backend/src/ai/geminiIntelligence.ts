@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import ollama from 'ollama';
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,18 +28,121 @@ export interface GlobalRepoSummary {
     recommendedOnboardingPath: string[]; // Ordered list of 5-10 files a junior dev should read first
 }
 
+export interface FileSummary {
+    summary: string;
+    responsibility: string;
+    is_entry_point: boolean;
+    key_exports: string[];
+    internal_calls: string[];
+    complexity: 'low' | 'medium' | 'high';
+    patterns: string[];
+    external_deps: string[];
+    code_quality: 'clean' | 'acceptable' | 'needs_refactor';
+    layer: 'presentation' | 'business_logic' | 'data_access' | 'infrastructure' | 'utility' | 'config' | 'unknown';
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function getModel(apiKey?: string) {
+function getModel(apiKey?: string, modelName: string = 'gemini-3-flash-preview') {
     const key = apiKey || process.env.GEMINI_API_KEY;
     if (!key) {
         throw new Error('Missing GEMINI_API_KEY environment variable. Please provide an API key.');
     }
     const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({
-        model: 'gemini-1.5-flash',
-        generationConfig: { responseMimeType: 'application/json' },
-    });
+    return genAI.getGenerativeModel(
+        { model: modelName },
+        { apiVersion: 'v1beta' }
+    );
+}
+
+function getJsonModel(apiKey?: string, modelName: string = 'gemini-3-flash-preview') {
+    const key = apiKey || process.env.GEMINI_API_KEY;
+    if (!key) {
+        throw new Error('Missing GEMINI_API_KEY environment variable. Please provide an API key.');
+    }
+    const genAI = new GoogleGenerativeAI(key);
+    return genAI.getGenerativeModel(
+        {
+            model: modelName,
+            generationConfig: { responseMimeType: 'application/json' },
+        },
+        { apiVersion: 'v1beta' }
+    );
+}
+
+/**
+ * Robustly parses JSON from a model response, handling potential markdown fences.
+ */
+function parseJsonResponse<T>(text: string): T {
+    try {
+        // Try direct parse first
+        return JSON.parse(text) as T;
+    } catch {
+        // Fallback: extract from markdown blocks
+        const cleaned = text.replace(/```json\n?|```/g, '').trim();
+        try {
+            return JSON.parse(cleaned) as T;
+        } catch (err) {
+            console.error('[Gemini] Failed to parse JSON even after cleaning:', text);
+            throw new Error(`Failed to parse AI response as JSON: ${err}`);
+        }
+    }
+}
+
+/**
+ * Generates embeddings using text-embedding-004.
+ */
+export async function geminiEmbed(text: string, apiKey?: string): Promise<number[]> {
+    const key = apiKey || process.env.GEMINI_API_KEY;
+    if (!key) throw new Error('Missing GEMINI_API_KEY');
+    const genAI = new GoogleGenerativeAI(key);
+    const model = genAI.getGenerativeModel(
+        { model: "gemini-embedding-2-preview" },
+        { apiVersion: 'v1beta' }
+    );
+    
+    try {
+        const result = await model.embedContent(text);
+        return result.embedding.values;
+    } catch (err: any) {
+        console.error('[Gemini] Embedding failed:', err.message);
+        throw err;
+    }
+}
+
+/**
+ * Generates a high-quality architectural summary for a single file.
+ */
+export async function summarizeFileWithGemini(filePath: string, code: string, apiKey?: string): Promise<FileSummary> {
+    const model = getJsonModel(apiKey);
+
+    const prompt = `You are a senior software architect performing deep multi-language codebase analysis.
+Analyze the provided source code file and return ONLY a valid JSON object with EXACTLY these keys:
+{
+  "summary": "1-2 sentences describing this file's architectural role and purpose (WHAT and WHY)",
+  "responsibility": "One concise line: the single core responsibility this file owns",
+  "is_entry_point": false,
+  "key_exports": ["ExportedFunctionOrClassName"],
+  "internal_calls": ["functionNameCalledInternally"],
+  "complexity": "low|medium|high",
+  "patterns": ["PatternName"],
+  "external_deps": ["library-or-package-name"],
+  "code_quality": "clean|acceptable|needs_refactor",
+  "layer": "presentation|business_logic|data_access|infrastructure|utility|config|unknown"
+}
+
+File: ${filePath}
+
+Code Content:
+${code}`;
+
+    try {
+        const result = await model.generateContent(prompt);
+        return parseJsonResponse<FileSummary>(result.response.text());
+    } catch (err: any) {
+        console.error(`[Gemini] Summarization failed for ${filePath}:`, err.message);
+        throw err;
+    }
 }
 
 // ─── 1. Query-scoped Architectural Analysis ───────────────────────────────────
@@ -54,7 +157,7 @@ export async function askGeminiArchitect(
     apiKey?: string
 ): Promise<ArchitectureAnalysis> {
     console.log(`[Gemini] Starting synthesis for query: "${userQuery}"`);
-    const model = getModel(apiKey);
+    const model = getJsonModel(apiKey);
 
     const prompt = `You are a Principal Software Architect performing a deep code review.
 You have been given a filtered sub-graph of a repository (the files most semantically relevant to the user's query).
@@ -86,24 +189,10 @@ Rules:
         const result = await model.generateContent(prompt);
         const text = result.response.text();
         console.log(`[Gemini] Received response text (${text.length} chars)`);
-        return JSON.parse(text) as ArchitectureAnalysis;
+        return parseJsonResponse<ArchitectureAnalysis>(text);
     } catch (err: any) {
         console.error(`[Gemini] Error during content generation:`, err.message);
-        console.log(`[Gemini] Falling back to local Ollama (qwen2.5-coder:3b)...`);
-        
-        try {
-            const response = await ollama.chat({
-                model: 'qwen2.5-coder:3b',
-                messages: [{ role: 'user', content: prompt + "\n\nIMPORTANT: Return ONLY valid JSON. Keep the response compact." }],
-                format: 'json',
-            });
-            const text = response.message.content;
-            console.log(`[Ollama] Synthesis complete (${text.length} chars)`);
-            return JSON.parse(text) as ArchitectureAnalysis;
-        } catch (ollamaErr: any) {
-            console.error(`[Ollama] Fallback failed:`, ollamaErr.message);
-            throw err; // Re-throw the original Gemini error for diagnostic visibility
-        }
+        throw err;
     }
 }
 
@@ -123,9 +212,10 @@ export async function generateGlobalRepoSummary(
         external_deps: string[];
         is_entry_point: boolean;
         key_exports: string[];
-    }>
+    }>,
+    apiKey?: string
 ): Promise<GlobalRepoSummary> {
-    const model = getModel();
+    const model = getJsonModel(apiKey);
 
     // Build a compact representation to avoid token overflow
     const compactContext = allFileSummaries.map(f => ({
@@ -166,21 +256,9 @@ Rules:
 
     try {
         const result = await model.generateContent(prompt);
-        return JSON.parse(result.response.text()) as GlobalRepoSummary;
+        return parseJsonResponse<GlobalRepoSummary>(result.response.text());
     } catch (err: any) {
-        console.warn(`[Gemini] Global summary failed: ${err.message}. Trying Ollama fallback...`);
-        try {
-            const response = await ollama.chat({
-                model: 'qwen2.5-coder:3b',
-                messages: [{ role: 'user', content: prompt + "\n\nIMPORTANT: Return ONLY valid JSON." }],
-                format: 'json',
-            });
-            const text = response.message.content;
-            console.log(`[Ollama] Global summary complete (${text.length} chars)`);
-            return JSON.parse(text) as GlobalRepoSummary;
-        } catch (ollamaErr: any) {
-            console.error(`[Ollama] Global summary fallback failed:`, ollamaErr.message);
-            throw err;
-        }
+        console.error(`[Gemini] Global summary failed: ${err.message}`);
+        throw err;
     }
 }

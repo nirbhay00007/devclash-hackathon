@@ -2,13 +2,14 @@ import { extractGraph, GraphNode } from './parser';
 import { detectLanguage } from './langDetector';
 import { cloneAndExtractJavaGraph, adaptJavaGraphToGraphNodes } from './javaBackendClient';
 import { cloneRepoLocally } from './gitCloner';
-import { summarizeFile } from '../ai/ollamaSummarizer';
+import { summarizeFileWithGemini, generateGlobalRepoSummary, GlobalRepoSummary, FileSummary } from '../ai/geminiIntelligence';
+import fs from 'fs';
 import {
     clearVectorStore, persistVectorStore,
     addRichDocument, buildCompositeText,
 } from '../storage/vectorStore';
 import { globalGraph } from '../storage/graphStore';
-import { generateGlobalRepoSummary, GlobalRepoSummary } from '../ai/geminiIntelligence';
+
 import { initStore } from '../storage/persistentStore';
 import { countGitChurn } from './gitAnalyzer';
 import { Response } from 'express';
@@ -73,10 +74,12 @@ export interface PipelineOptions {
     repoId?: string;
     /** Human-readable repo name */
     repoLabel?: string;
+    /** User-provided Gemini API key */
+    apiKey?: string;
 }
 
-// Concurrency: 4 parallel Ollama calls (safe for 4-core; increase to 8 on better machines)
-const CONCURRENCY = 4;
+// Concurrency: 2 parallel Gemini calls (respecting rate limits while ensuring progress)
+const CONCURRENCY = 2;
 
 // ─── Main Pipeline ───────────────────────────────────────────────────────────
 
@@ -264,7 +267,36 @@ export async function runIngestionPipeline(
         }> = [];
 
         await Promise.all(rawNodes.map(node => limit(async () => {
-            const s = await summarizeFile(node.id);
+            let s: FileSummary;
+            
+            try {
+                const code = fs.readFileSync(node.id, 'utf-8');
+                const hash = crypto.createHash('sha256').update(code).digest('hex');
+                const cached = store.getCached(node.id, hash);
+                
+                if (cached) {
+                    s = cached as FileSummary;
+                } else {
+                    // Truncate ultra-large files to save tokens and prevent context overflow
+                    const truncatedCode = code.length > 30000 ? code.substring(0, 30000) + "\n... [TRUNCATED]" : code;
+                    s = await summarizeFileWithGemini(node.id, truncatedCode, options.apiKey);
+                    store.setCached(node.id, hash, s);
+                }
+            } catch (err: any) {
+                console.error(`[Pipeline] Gemini summarization failed for ${node.id}:`, err.message);
+                s = {
+                    summary: `Analysis failed: ${err.message}`,
+                    responsibility: 'Unknown',
+                    is_entry_point: false,
+                    key_exports: [],
+                    internal_calls: [],
+                    complexity: 'low',
+                    patterns: [],
+                    external_deps: [],
+                    code_quality: 'acceptable',
+                    layer: 'unknown'
+                };
+            }
 
             // Add node to in-memory graph
             globalGraph.addNode({
@@ -308,7 +340,7 @@ export async function runIngestionPipeline(
                 isEntryPoint:   s.is_entry_point,
                 responsibility: s.responsibility,
                 internalCalls:  s.internal_calls,
-            });
+            }, options.apiKey);
 
             // Accumulate for Gemini global summary
             geminiPayload.push({
@@ -369,7 +401,7 @@ export async function runIngestionPipeline(
         });
 
         try {
-            _lastGlobalSummary = await generateGlobalRepoSummary(geminiPayload);
+            _lastGlobalSummary = await generateGlobalRepoSummary(geminiPayload, options.apiKey);
             if (_lastGlobalSummary?.complexityHotspots) {
                 globalGraph.applyGeminiRiskAnnotations(_lastGlobalSummary.complexityHotspots);
             }

@@ -54,9 +54,9 @@ app.post('/api/analyze', async (req, res) => {
         return res.status(400).json({ error: 'Request body must be JSON with "targetPath" or "repoUrl".' });
     }
 
-    let { targetPath, repoUrl, language, repoId, repoLabel } = req.body as {
+    let { targetPath, repoUrl, language, repoId, repoLabel, apiKey } = req.body as {
         targetPath?: string; repoUrl?: string; language?: string;
-        repoId?: string; repoLabel?: string;
+        repoId?: string; repoLabel?: string; apiKey?: string;
     };
 
     // Graceful fallback: If the frontend sends a URL inside targetPath, intercept it
@@ -87,6 +87,7 @@ app.post('/api/analyze', async (req, res) => {
         language:   (language as PipelineOptions['language']) ?? 'auto',
         repoId:     repoId,
         repoLabel:  repoLabel,
+        apiKey:     apiKey,
     };
 
     // Set up SSE
@@ -206,7 +207,7 @@ app.post('/api/query', async (req, res) => {
     console.log(`[API /api/query] Incoming query: "${query}"`);
     try {
         // Step 1: Semantic vector search (with keyword fallback built-in)
-        const searchResults = await semanticSearch(query.trim(), maxResults);
+        const searchResults = await semanticSearch(query.trim(), maxResults, apiKey);
 
         if (searchResults.length === 0) {
             console.log(`[API /api/query] No relevant files found for: "${query}"`);
@@ -288,7 +289,7 @@ app.post('/api/query/stream', async (req, res) => {
 
     try {
         sse({ phase: 'search', message: 'Running semantic search…' });
-        const searchResults = await semanticSearch(query.trim(), maxResults);
+        const searchResults = await semanticSearch(query.trim(), maxResults, apiKey);
 
         if (searchResults.length === 0) {
             sse({ phase: 'error', message: 'No relevant files found in vector store.' });

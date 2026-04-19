@@ -161,7 +161,7 @@ export default function App() {
     try {
       const res = await fetch(`${API}/api/analyze`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetPath: path, repoId: id, repoLabel: repo.label }), signal: abort.signal,
+        body: JSON.stringify({ targetPath: path, repoId: id, repoLabel: repo.label, apiKey: apiKey.trim() }), signal: abort.signal,
       });
       if (!res.ok || !res.body) { updateRepo(id, { status: 'error', log: [`❌ HTTP ${res.status}`] }); return; }
       const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';

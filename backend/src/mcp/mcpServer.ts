@@ -19,7 +19,7 @@
 
 import { semanticSearch, SearchResult, upsertDocument, buildCompositeText } from '../storage/vectorStore';
 import { globalGraph, NodeMetadata, Edge } from '../storage/graphStore';
-import { summarizeFile } from '../ai/ollamaSummarizer';
+import { summarizeFileWithGemini } from '../ai/geminiIntelligence';
 import path from 'path';
 import fs from 'fs';
 
@@ -122,6 +122,7 @@ export async function executeMcpTool(
     toolName: string,
     input: Record<string, any>,
     lastGlobalSummary: any,
+    apiKey?: string
 ): Promise<string> {
     switch (toolName) {
 
@@ -132,7 +133,7 @@ export async function executeMcpTool(
 
             if (!task) return 'Error: task parameter is required.';
 
-            const results = await semanticSearch(task, maxResults);
+            const results = await semanticSearch(task, maxResults, apiKey);
             if (results.length === 0) {
                 return (
                     'No relevant files found in the local index. ' +
@@ -283,12 +284,13 @@ export async function executeMcpTool(
 
             const fileBasename = path.basename(filePath);
 
-            // 2. Re-summarize with local Ollama (reads the file itself, lightweight)
-            let freshSummary: Awaited<ReturnType<typeof summarizeFile>>;
+            // 2. Re-summarize with Gemini (reads the file itself)
+            let freshSummary: any;
             try {
-                freshSummary = await summarizeFile(filePath);
+                const code = fs.readFileSync(filePath, 'utf-8');
+                freshSummary = await summarizeFileWithGemini(filePath, code, apiKey);
             } catch (err: any) {
-                return `Error: Ollama summarization failed: ${err?.message ?? err}. Is Ollama running?`;
+                return `Error: Gemini summarization failed: ${err?.message ?? err}. Check your API key.`;
             }
 
             // 3. Update the in-memory graph node if it exists
@@ -336,7 +338,7 @@ export async function executeMcpTool(
                 externalDeps:   freshSummary.external_deps,
                 complexity:     freshSummary.complexity,
                 isEntryPoint:   freshSummary.is_entry_point,
-            });
+            }, apiKey);
 
             return [
                 `# ✅ Memory Sync Complete — ${fileBasename}`,

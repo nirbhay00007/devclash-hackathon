@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { FileSummary } from '../ai/ollamaSummarizer';
+import { FileSummary } from '../ai/geminiIntelligence';
 import { NodeMetadata, Edge } from './graphStore';
 
 // ─── Directory Structure ──────────────────────────────────────────────────────

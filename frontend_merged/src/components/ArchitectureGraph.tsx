@@ -9,9 +9,9 @@ import {
   BackgroundVariant,
   type Node,
   type Edge,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import Dagre from '@dagrejs/dagre';
 
 import CustomNode from './CustomNode';
 
@@ -67,11 +67,23 @@ const NODE_H = 40;
  * then positions clusters in a radial pattern around the center.
  * Cross-repo edges connect across cluster boundaries.
  */
+interface RepoLayout {
+  id: string;
+  label: string;
+  color: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 function applyMultiRepoLayout(
   nodes: BackendNode[],
   edges: BackendEdge[],
-): BackendNode[] {
-  if (nodes.length === 0) return nodes;
+): { nodes: BackendNode[]; groups: RepoLayout[] } {
+  if (nodes.length === 0) return { nodes, groups: [] };
+
+  const groups: RepoLayout[] = [];
 
   // Group by repo
   const repoGroups = new Map<string, BackendNode[]>();
@@ -86,7 +98,28 @@ function applyMultiRepoLayout(
 
   if (repoIds.length <= 1) {
     // Single repo — standard Dagre tree
-    return applySingleRepoLayout(nodes, edges);
+    const laidNodes = applySingleRepoLayout(nodes, edges);
+    
+    // Compute bounding box for single repo group
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    laidNodes.forEach(n => {
+      minX = Math.min(minX, n.position.x);
+      maxX = Math.max(maxX, n.position.x + NODE_W);
+      minY = Math.min(minY, n.position.y);
+      maxY = Math.max(maxY, n.position.y + NODE_H);
+    });
+
+    groups.push({
+      id: nodes[0]?.data.repoId ?? 'default',
+      label: nodes[0]?.data.repoLabel ?? 'Repository',
+      color: nodes[0]?.data.repoColor ?? '#6366f1',
+      x: minX - 40,
+      y: minY - 60,
+      width: (maxX - minX) + 80,
+      height: (maxY - minY) + 100,
+    });
+
+    return { nodes: laidNodes, groups };
   }
 
   // Multi-repo: lay out each cluster, then place clusters radially
@@ -142,12 +175,25 @@ function applyMultiRepoLayout(
         y: n.position.y + offsetY,
       });
     });
+
+    groups.push({
+      id: rid,
+      label: cluster.nodes[0]?.data.repoLabel ?? rid,
+      color: cluster.nodes[0]?.data.repoColor ?? '#6366f1',
+      x: offsetX - 40,
+      y: offsetY - 60,
+      width: cluster.width + 80,
+      height: cluster.height + 100,
+    });
   });
 
-  return nodes.map(n => ({
-    ...n,
-    position: positioned.get(n.id) ?? n.position,
-  }));
+  return {
+    nodes: nodes.map(n => ({
+      ...n,
+      position: positioned.get(n.id) ?? n.position,
+    })),
+    groups
+  };
 }
 
 function applySingleRepoLayout(nodes: BackendNode[], _edges: BackendEdge[]): BackendNode[] {
@@ -266,16 +312,34 @@ function detectCrossRepoEdges(
 // ─── Edge styles ─────────────────────────────────────────────────────────────
 
 const edgeIntra = { stroke: '#94a3b8', strokeWidth: 2 };
-const edgeIntraHover = { stroke: '#f97316', strokeWidth: 3.5 };
 const edgeCross = { stroke: '#2563eb', strokeWidth: 2.5, strokeDasharray: '8 4' };
-const edgeCrossHover = { stroke: '#f97316', strokeWidth: 3.5, strokeDasharray: '6 4' };
 
 const markerIntra = { type: 'arrowclosed' as const, color: '#94a3b8', width: 12, height: 12 };
 const markerIntraHover = { type: 'arrowclosed' as const, color: '#f97316', width: 14, height: 14 };
 const markerCross = { type: 'arrowclosed' as const, color: '#2563eb', width: 14, height: 14 };
-const markerCrossHover = { type: 'arrowclosed' as const, color: '#f97316', width: 16, height: 16 };
 
-const nodeTypes = { custom: CustomNode };
+// ─── Custom Components ───────────────────────────────────────────────────────
+
+function RepoGroupNode({ data }: { data: { label: string; color: string; width: number; height: number } }) {
+  return (
+    <div className="repo-group-node" style={{ 
+      width: data.width, 
+      height: data.height,
+      borderColor: `${data.color}44`,
+      background: `${data.color}08`
+    }}>
+      <div className="repo-group-header" style={{ borderColor: `${data.color}66` }}>
+        <div className="repo-group-dot" style={{ background: data.color }} />
+        {data.label}
+      </div>
+    </div>
+  );
+}
+
+const nodeTypes = { 
+  custom: CustomNode,
+  repoGroup: RepoGroupNode 
+};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -286,12 +350,38 @@ export default function ArchitectureGraph({
 }: Props) {
   const [collapsedNodeIds, setCollapsedNodeIds] = useState<Set<string>>(new Set());
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null);
   const hasInitialized = useRef(false);
 
-  // Initial Collapse: All parents (nodes with children) start compressed
+  // Initial Collapse: All parents (nodes with children) start compressed, EXCEPT ancestors of cross-repo nodes
   useEffect(() => {
     if (!hasInitialized.current && backendNodes.length > 0) {
       const parentIds = new Set(backendEdges.map(e => e.source));
+      
+      // Find cross-repo edges so we can auto-expand their nodes
+      const cross = detectCrossRepoEdges(backendNodes, backendEdges);
+      const crossNodeIds = new Set<string>();
+      cross.forEach(e => { crossNodeIds.add(e.source); crossNodeIds.add(e.target); });
+
+      // Trace back incoming edges to find all ancestors
+      const toUncollapse = new Set<string>();
+      const queue = Array.from(crossNodeIds);
+      const visited = new Set<string>(queue);
+
+      while (queue.length > 0) {
+        const curr = queue.shift()!;
+        backendEdges.filter(e => e.target === curr).forEach(e => {
+          if (!visited.has(e.source)) {
+            visited.add(e.source);
+            queue.push(e.source);
+            toUncollapse.add(e.source); // Parent must be expanded to reveal child
+          }
+        });
+      }
+
+      // Remove ancestors from the collapse list so paths to cross-nodes are visible
+      toUncollapse.forEach(id => parentIds.delete(id));
+
       setCollapsedNodeIds(parentIds);
       hasInitialized.current = true;
     }
@@ -305,6 +395,18 @@ export default function ArchitectureGraph({
       return next;
     });
   }, []);
+
+  const onReset = useCallback(() => {
+    const parentIds = new Set(backendEdges.map(e => e.source));
+    setCollapsedNodeIds(parentIds);
+    setSelectedNodeId(null);
+    onNodeSelect?.(null);
+    
+    // Smoothly refit the view after resetting state
+    setTimeout(() => {
+      rfInstance?.fitView({ duration: 800, padding: 0.15 });
+    }, 50);
+  }, [backendEdges, onNodeSelect, rfInstance]);
 
   // Detect cross-repo edges
   const allEdgesBeforeCollapse = useMemo(() => {
@@ -356,14 +458,14 @@ export default function ArchitectureGraph({
   const allEdges = visibleEdges;
 
   // Auto-layout
-  const laidOutNodes = useMemo(
+  const { nodes: laidOutNodes, groups } = useMemo(
     () => applyMultiRepoLayout(visibleNodes, allEdges),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [visibleNodes.length, allEdges.length],
   );
 
-  const initialNodes: Node[] = useMemo(() =>
-    laidOutNodes.map(n => {
+  const initialNodes: Node[] = useMemo(() => {
+    const fileNodes: Node[] = laidOutNodes.map(n => {
       const isDimmed = selectedNodeId !== null && selectedNodeId !== n.id && 
                        !allEdges.some(e => (e.source === selectedNodeId && e.target === n.id) || (e.target === selectedNodeId && e.source === n.id));
 
@@ -379,8 +481,21 @@ export default function ArchitectureGraph({
           isDimmed
         }
       };
-    })
-    , [laidOutNodes, onToggle, collapsedNodeIds, selectedNodeId, allEdges]);
+    });
+
+    const groupNodes: Node[] = groups.map(g => ({
+      id: `group-${g.id}`,
+      type: 'repoGroup',
+      position: { x: g.x, y: g.y },
+      data: { label: g.label, color: g.color, width: g.width, height: g.height },
+      selectable: false,
+      draggable: false,
+      zIndex: -10,
+    }));
+
+    return [...groupNodes, ...fileNodes];
+  }
+    , [laidOutNodes, groups, onToggle, collapsedNodeIds, selectedNodeId, allEdges]);
 
   const initialEdges: Edge[] = useMemo(() =>
     allEdges.map(e => {
@@ -490,6 +605,19 @@ export default function ArchitectureGraph({
           💡 Click a node to focus its connections.<br />
           {repos.length > 1 && '🔗 Blue dashed lines = cross-repo links.'}
         </div>
+
+        <button 
+          onClick={onReset}
+          className="btn btn-outline btn-sm btn-reset-graph"
+          style={{ width: '100%', marginTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '6px 0' }}
+          title="Reset graph to initial configuration (collapse all files)"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+          </svg>
+          Reset View
+        </button>
       </div>
 
       {/* React Flow */}
@@ -500,6 +628,7 @@ export default function ArchitectureGraph({
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}
         onPaneClick={onPaneClick}
+        onInit={setRfInstance}
         nodeTypes={nodeTypes}
         fitView
         fitViewOptions={{ padding: 0.15 }}

@@ -1,5 +1,5 @@
-import ollama from 'ollama';
 import { getStore, RichVectorDoc } from './persistentStore';
+import { geminiEmbed } from '../ai/geminiIntelligence';
 
 // ─── In-memory store (loaded from / saved to PersistentStore) ─────────────────
 
@@ -57,20 +57,15 @@ export function buildCompositeText(
 
 export function getVectorStoreSize() { return _docs.length; }
 
-export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>) {
+export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>, apiKey?: string) {
     // Idempotent: skip if already embedded this session
     if (_docs.some(d => d.filePath === doc.filePath)) return;
 
     try {
-        const response = await ollama.embeddings({
-            model: 'nomic-embed-text',
-            prompt: doc.compositeText,
-        });
-        _docs.push({ ...doc, vector: response.embedding });
+        const embedding = await geminiEmbed(doc.compositeText, apiKey);
+        _docs.push({ ...doc, vector: embedding });
     } catch (err: any) {
-        // Log the real error — silent swallowing hides misconfiguration
-        console.warn(`[VectorStore] Embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
-        // Fallback: store without vector (keyword search still works)
+        console.warn(`[VectorStore] Gemini embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
         _docs.push({ ...doc, vector: [] });
     }
 }
@@ -87,20 +82,17 @@ export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>) {
  *   3. Insert the updated doc.
  *   4. Persist the updated store to disk immediately.
  */
-export async function upsertDocument(doc: Omit<RichVectorDoc, 'vector'>): Promise<'updated' | 'inserted' | 'error'> {
+export async function upsertDocument(doc: Omit<RichVectorDoc, 'vector'>, apiKey?: string): Promise<'updated' | 'inserted' | 'error'> {
     // Remove stale entry
     const prevIdx = _docs.findIndex(d => d.filePath === doc.filePath);
     if (prevIdx !== -1) _docs.splice(prevIdx, 1);
 
     try {
-        const response = await ollama.embeddings({
-            model: 'nomic-embed-text',
-            prompt: doc.compositeText,
-        });
-        _docs.push({ ...doc, vector: response.embedding });
+        const embedding = await geminiEmbed(doc.compositeText, apiKey);
+        _docs.push({ ...doc, vector: embedding });
     } catch (err: any) {
         console.warn(`[VectorStore] Upsert embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
-        _docs.push({ ...doc, vector: [] }); // keyword fallback still works
+        _docs.push({ ...doc, vector: [] });
     }
 
     // Persist immediately so the update survives restarts
@@ -208,6 +200,7 @@ function keywordSearch(query: string, maxResults: number): RichVectorDoc[] {
 export async function semanticSearch(
     query: string,
     maxResults: number = 8,
+    apiKey?: string,
     useMmr = true
 ): Promise<SearchResult[]> {
     if (_docs.length === 0) return [];
@@ -215,9 +208,8 @@ export async function semanticSearch(
     // Attempt vector search; fall back to keyword search if Ollama embed fails
     let results: RichVectorDoc[];
     try {
-        const response = await ollama.embeddings({ model: 'nomic-embed-text', prompt: query });
-        const queryVec = response.embedding;
-
+        const queryVec = await geminiEmbed(query.trim(), apiKey);
+        
         // Only score docs that have a valid embedding vector
         const embeddable = _docs.filter(d => d.vector.length > 0);
         const scored = embeddable.map(doc => ({
@@ -245,7 +237,7 @@ export async function semanticSearch(
             score:          cosineSimilarity(queryVec, doc.vector),
         }));
     } catch (err: any) {
-        console.warn(`[VectorStore] Vector search failed (${err?.message}), using keyword fallback`);
+        console.warn(`[VectorStore] Gemini search failed (${err?.message}), using keyword fallback`);
         results = keywordSearch(query, maxResults);
         return results.map(doc => ({
             filePath:       doc.filePath,
@@ -257,7 +249,7 @@ export async function semanticSearch(
             patterns:       doc.patterns,
             complexity:     doc.complexity,
             isEntryPoint:   doc.isEntryPoint,
-            score:          0.5, // synthetic score for keyword hits
+            score:          0.5,
         }));
     }
 }
