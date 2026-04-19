@@ -19,7 +19,7 @@
 
 import { semanticSearch, SearchResult, upsertDocument, buildCompositeText } from '../storage/vectorStore';
 import { globalGraph, NodeMetadata, Edge } from '../storage/graphStore';
-import { summarizeFileWithGemini } from '../ai/geminiIntelligence';
+import { summarizeFile } from '../ai/ollamaSummarizer';
 import path from 'path';
 import fs from 'fs';
 
@@ -287,10 +287,9 @@ export async function executeMcpTool(
             // 2. Re-summarize with Gemini (reads the file itself)
             let freshSummary: any;
             try {
-                const code = fs.readFileSync(filePath, 'utf-8');
-                freshSummary = await summarizeFileWithGemini(filePath, code, apiKey);
+                freshSummary = await summarizeFile(filePath);
             } catch (err: any) {
-                return `Error: Gemini summarization failed: ${err?.message ?? err}. Check your API key.`;
+                return `Error: Ollama summarization failed: ${err?.message ?? err}.`;
             }
 
             // 3. Update the in-memory graph node if it exists

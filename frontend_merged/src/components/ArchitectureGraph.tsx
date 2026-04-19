@@ -362,6 +362,13 @@ export default function ArchitectureGraph({
       const cross = detectCrossRepoEdges(backendNodes, backendEdges);
       const crossNodeIds = new Set<string>();
       cross.forEach(e => { crossNodeIds.add(e.source); crossNodeIds.add(e.target); });
+      // Also include nodes from existing edges that cross repos (rule 3)
+      backendEdges.forEach(e => {
+        if (e.crossRepo) {
+          crossNodeIds.add(e.source);
+          crossNodeIds.add(e.target);
+        }
+      });
 
       // Trace back incoming edges to find all ancestors
       const toUncollapse = new Set<string>();
@@ -398,6 +405,35 @@ export default function ArchitectureGraph({
 
   const onReset = useCallback(() => {
     const parentIds = new Set(backendEdges.map(e => e.source));
+    
+    // Find cross-repo edges so we can auto-expand their nodes
+    const cross = detectCrossRepoEdges(backendNodes, backendEdges);
+    const crossNodeIds = new Set<string>();
+    cross.forEach(e => { crossNodeIds.add(e.source); crossNodeIds.add(e.target); });
+    backendEdges.forEach(e => {
+      if (e.crossRepo) {
+        crossNodeIds.add(e.source);
+        crossNodeIds.add(e.target);
+      }
+    });
+
+    // Trace back incoming edges to find all ancestors
+    const toUncollapse = new Set<string>();
+    const queue = Array.from(crossNodeIds);
+    const visited = new Set<string>(queue);
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      backendEdges.filter(e => e.target === curr).forEach(e => {
+        if (!visited.has(e.source)) {
+          visited.add(e.source);
+          queue.push(e.source);
+          toUncollapse.add(e.source); // Parent must be expanded to reveal child
+        }
+      });
+    }
+
+    toUncollapse.forEach(id => parentIds.delete(id));
     setCollapsedNodeIds(parentIds);
     setSelectedNodeId(null);
     onNodeSelect?.(null);
@@ -406,7 +442,7 @@ export default function ArchitectureGraph({
     setTimeout(() => {
       rfInstance?.fitView({ duration: 800, padding: 0.15 });
     }, 50);
-  }, [backendEdges, onNodeSelect, rfInstance]);
+  }, [backendNodes, backendEdges, onNodeSelect, rfInstance]);
 
   // Detect cross-repo edges
   const allEdgesBeforeCollapse = useMemo(() => {

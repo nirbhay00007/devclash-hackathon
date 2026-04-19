@@ -560,24 +560,26 @@ app.post('/api/notify-changes', async (req, res) => {
 const PORT = Number(process.env.PORT ?? 3001);
 app.listen(PORT, () => {
     console.log('════════════════════════════════════════════════════════════');
-    console.log(`  DEV_CLASH Backend API — Port ${PORT}`);
-    console.log(`  Java AST Backend expected at port ${process.env.JAVA_BACKEND_PORT ?? 8080}`);
-    console.log('  Core Endpoints:');
-    console.log('    GET  /api/status        → Health of Node + Java microservices');
-    console.log('    POST /api/analyze       → Full ingestion: { targetPath } or { repoUrl }');
-    console.log('    POST /api/load          → Reload from .dev-clash/ cache (instant)');
-    console.log('    GET  /api/graph         → Current in-memory graph snapshot');
-    console.log('    GET  /api/summary       → Gemini global repo summary');
-    console.log('    POST /api/query         → Semantic search + Gemini RAG');
-    console.log('    POST /api/query/stream  → Same, streamed over SSE');
-    console.log('  Agent / MCP Endpoints:');
-    console.log('    POST /api/agent-sync       → HTTP context bridge for any AI agent');
-    console.log('    POST /api/mcp              → Full MCP protocol (Claude Desktop, Cursor)');
-    console.log('    POST /api/notify-changes   → Incremental memory sync for edited files');
-    console.log('  FileSystem Endpoints:');
-    console.log('    GET  /api/fs/read       → Read raw file content');
-    console.log('    GET  /api/fs/list       → List directory contents');
-    console.log('    POST /api/fs/open       → Open in VS Code / default OS app');
-    console.log('    GET  /health            → Health check');
-    console.log('════════════════════════════════════════════════════════════');
+
+    // ─── Auto-Load Previous Analysis ──────────────────────────────────────────
+    const autoLoadPath = path.resolve('.');
+    const dotClashPath = path.join(autoLoadPath, '.dev-clash');
+    if (fs.existsSync(dotClashPath)) {
+        console.log(`[Startup] Detected .dev-clash folder in ${autoLoadPath}. Auto-loading…`);
+        try {
+            const store = initStore(autoLoadPath);
+            const persistedGraph = store.loadGraph();
+            const persistedVectors = store.loadVectors();
+            if (persistedGraph && persistedVectors) {
+                globalGraph.clear();
+                persistedGraph.nodes.forEach((n: any) => globalGraph.addNode(n));
+                persistedGraph.edges.forEach((e: any) => globalGraph.addEdge(e.source, e.target));
+                globalGraph.computeMetrics();
+                initVectorStore(persistedVectors);
+                console.log(`[Startup] ✅ Successfully recovered ${persistedGraph.nodes.length} nodes from disk.`);
+            }
+        } catch (err: any) {
+            console.warn(`[Startup] Auto-load failed: ${err.message}`);
+        }
+    }
 });

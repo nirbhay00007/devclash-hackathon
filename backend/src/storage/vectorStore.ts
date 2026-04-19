@@ -1,5 +1,6 @@
 import { getStore, RichVectorDoc } from './persistentStore';
 import { geminiEmbed } from '../ai/geminiIntelligence';
+import { ollamaEmbed } from '../ai/ollamaSummarizer';
 
 // ─── In-memory store (loaded from / saved to PersistentStore) ─────────────────
 
@@ -57,15 +58,16 @@ export function buildCompositeText(
 
 export function getVectorStoreSize() { return _docs.length; }
 
-export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>, apiKey?: string) {
+export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>, _apiKey?: string) {
     // Idempotent: skip if already embedded this session
     if (_docs.some(d => d.filePath === doc.filePath)) return;
 
     try {
-        const embedding = await geminiEmbed(doc.compositeText, apiKey);
+        // Use local Ollama embedding for reliability and speed (zero-cost)
+        const embedding = await ollamaEmbed(doc.compositeText);
         _docs.push({ ...doc, vector: embedding });
     } catch (err: any) {
-        console.warn(`[VectorStore] Gemini embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
+        console.warn(`[VectorStore] Local Ollama embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
         _docs.push({ ...doc, vector: [] });
     }
 }
@@ -82,16 +84,17 @@ export async function addRichDocument(doc: Omit<RichVectorDoc, 'vector'>, apiKey
  *   3. Insert the updated doc.
  *   4. Persist the updated store to disk immediately.
  */
-export async function upsertDocument(doc: Omit<RichVectorDoc, 'vector'>, apiKey?: string): Promise<'updated' | 'inserted' | 'error'> {
+export async function upsertDocument(doc: Omit<RichVectorDoc, 'vector'>, _apiKey?: string): Promise<'updated' | 'inserted' | 'error'> {
     // Remove stale entry
     const prevIdx = _docs.findIndex(d => d.filePath === doc.filePath);
     if (prevIdx !== -1) _docs.splice(prevIdx, 1);
 
     try {
-        const embedding = await geminiEmbed(doc.compositeText, apiKey);
+        // Local Ollama embedding for incremental sync
+        const embedding = await ollamaEmbed(doc.compositeText);
         _docs.push({ ...doc, vector: embedding });
     } catch (err: any) {
-        console.warn(`[VectorStore] Upsert embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
+        console.warn(`[VectorStore] Local upsert embedding failed for ${doc.fileBasename}: ${err?.message ?? err}`);
         _docs.push({ ...doc, vector: [] });
     }
 
@@ -203,12 +206,14 @@ export async function semanticSearch(
     apiKey?: string,
     useMmr = true
 ): Promise<SearchResult[]> {
-    if (_docs.length === 0) return [];
+    if (_docs.length === 0) {
+        throw new Error('No relevant files found in memory. Please run "Analyze Codebase" or "Load Cache" to populate the engine.');
+    }
 
     // Attempt vector search; fall back to keyword search if Ollama embed fails
     let results: RichVectorDoc[];
     try {
-        const queryVec = await geminiEmbed(query.trim(), apiKey);
+        const queryVec = await ollamaEmbed(query.trim());
         
         // Only score docs that have a valid embedding vector
         const embeddable = _docs.filter(d => d.vector.length > 0);
@@ -237,7 +242,7 @@ export async function semanticSearch(
             score:          cosineSimilarity(queryVec, doc.vector),
         }));
     } catch (err: any) {
-        console.warn(`[VectorStore] Gemini search failed (${err?.message}), using keyword fallback`);
+        console.warn(`[VectorStore] Local Ollama search failed (${err?.message}), using keyword fallback`);
         results = keywordSearch(query, maxResults);
         return results.map(doc => ({
             filePath:       doc.filePath,

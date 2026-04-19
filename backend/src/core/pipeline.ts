@@ -2,7 +2,7 @@ import { extractGraph, GraphNode } from './parser';
 import { detectLanguage } from './langDetector';
 import { cloneAndExtractJavaGraph, adaptJavaGraphToGraphNodes } from './javaBackendClient';
 import { cloneRepoLocally } from './gitCloner';
-import { summarizeFileWithGemini, generateGlobalRepoSummary, GlobalRepoSummary, FileSummary } from '../ai/geminiIntelligence';
+import { summarizeFile, generateGlobalRepoSummary, GlobalRepoSummary, FileSummary } from '../ai/ollamaSummarizer';
 import fs from 'fs';
 import {
     clearVectorStore, persistVectorStore,
@@ -277,9 +277,8 @@ export async function runIngestionPipeline(
                 if (cached) {
                     s = cached as FileSummary;
                 } else {
-                    // Truncate ultra-large files to save tokens and prevent context overflow
-                    const truncatedCode = code.length > 30000 ? code.substring(0, 30000) + "\n... [TRUNCATED]" : code;
-                    s = await summarizeFileWithGemini(node.id, truncatedCode, options.apiKey);
+                    // Ollama handles its own truncation via summarizeFile
+                    s = await summarizeFile(node.id);
                     store.setCached(node.id, hash, s);
                 }
             } catch (err: any) {
@@ -401,7 +400,7 @@ export async function runIngestionPipeline(
         });
 
         try {
-            _lastGlobalSummary = await generateGlobalRepoSummary(geminiPayload, options.apiKey);
+            _lastGlobalSummary = await generateGlobalRepoSummary(geminiPayload);
             if (_lastGlobalSummary?.complexityHotspots) {
                 globalGraph.applyGeminiRiskAnnotations(_lastGlobalSummary.complexityHotspots);
             }

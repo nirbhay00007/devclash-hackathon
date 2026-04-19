@@ -18,6 +18,23 @@ export interface FileSummary {
     layer: 'presentation' | 'business_logic' | 'data_access' | 'infrastructure' | 'utility' | 'config' | 'unknown';
 }
 
+export interface Subsystem {
+    name: string;
+    description: string;
+    files: string[];
+}
+
+export interface GlobalRepoSummary {
+    overallPurpose: string;        // One-paragraph executive summary
+    techStack: string[];           // Frameworks + libraries detected
+    architecturalStyle: string;    // e.g. "Layered MVC", "Event-driven microservices"
+    coreSubsystems: Subsystem[];
+    complexityHotspots: string[];  // Top N highest-complexity files
+    entryPoints: string[];         // List of entry point files
+    suggestedImprovements: string[];
+    recommendedOnboardingPath: string[]; // Ordered list of 5-10 files a junior dev should read first
+}
+
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are a senior software architect performing deep multi-language codebase analysis.
@@ -166,4 +183,88 @@ function timeoutPromise(ms: number, label: string): Promise<never> {
     );
 }
 
+export async function ollamaEmbed(text: string): Promise<number[]> {
+    try {
+        const response = await ollama.embeddings({
+            model: 'nomic-embed-text',
+            prompt: text,
+        });
+        return response.embedding;
+    } catch (err: any) {
+        console.error(`[Ollama] Embedding failed: ${err.message}`);
+        throw err;
+    }
+}
+
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── Global Repo Summary ──────────────────────────────────────────────────────
+
+export async function generateGlobalRepoSummary(
+    allFileSummaries: Array<{
+        path: string;
+        summary: string;
+        complexity: string;
+        patterns: string[];
+        external_deps: string[];
+        is_entry_point: boolean;
+        key_exports: string[];
+    }>
+): Promise<GlobalRepoSummary> {
+    // Build a compact representation to avoid token overflow
+    const compactContext = allFileSummaries.map(f => ({
+        path: f.path,
+        summary: f.summary,
+        complexity: f.complexity,
+        patterns: f.patterns,
+        deps: f.external_deps,
+        entry: f.is_entry_point,
+    }));
+
+    const prompt = `You are a Principal Software Architect performing a holistic codebase review.
+Analyze ALL the file summaries below and generate a comprehensive architectural overview.
+
+FILE SUMMARIES (${compactContext.length} files):
+${JSON.stringify(compactContext, null, 2)}
+
+Return a JSON object with EXACTLY this structure:
+{
+  "overallPurpose": "One paragraph describing what this codebase does and its primary goals",
+  "techStack": ["Framework1", "Library2"],
+  "architecturalStyle": "e.g. Layered Architecture / Event-Driven / Microservices / MVC",
+  "coreSubsystems": [
+    { "name": "SubsystemName", "description": "What this group does", "files": ["path/to/file.ts"] }
+  ],
+  "complexityHotspots": ["path/to/most/complex/file.ts"],
+  "entryPoints": ["path/to/entry.ts"],
+  "suggestedImprovements": ["Specific improvement 1", "Specific improvement 2"],
+  "recommendedOnboardingPath": ["path/to/start.ts", "path/to/core.ts"]
+}
+
+Rules:
+- Group files into 3-7 meaningful logical subsystems.
+- "complexityHotspots" = top 5 highest-complexity files that need the most attention.
+- "suggestedImprovements" = concrete, prioritized recommendations.
+- "recommendedOnboardingPath" = ordered chronological listing of 5-10 files a beginner should read to understand the system.
+- Return ONLY valid JSON. No markdown formatting or extra text.`;
+
+    try {
+        const result = await ollama.chat({
+            model: 'qwen2.5-coder:3b',
+            messages: [
+                { role: 'user', content: prompt }
+            ],
+            format: 'json',
+            options: {
+                temperature: 0.05,
+                num_ctx: 16384,
+                num_predict: 2048,
+            },
+        });
+        
+        return JSON.parse(result.message.content) as GlobalRepoSummary;
+    } catch (err: any) {
+        console.error(`[Ollama] Global summary failed: ${err.message}`);
+        throw err;
+    }
+}
